@@ -98,6 +98,14 @@ docker compose up -d
 docker compose logs -f
 ```
 
+After pulling new changes, rebuild the image and recreate the container to pick them up:
+
+```bash
+git pull
+docker compose build
+docker compose up -d
+```
+
 `login` is a one-off: it prompts for your shop email and password, prints the address it emailed,
 and waits for you to open the link. Nothing is stored in the image — the device token lands in
 `config/credentials.json` on the host, which the long-running container mounts. You can equally
