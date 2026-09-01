@@ -18,7 +18,7 @@ services:
     stop_grace_period: 30s
 
     environment:
-      GTT_POLL_INTERVAL: "300"
+      GTT_POLL_INTERVAL: "30"
       GTT_LOG_LEVEL: "INFO"
       # Only affects log timestamps; everything in the archive is stored UTC.
       TZ: "Europe/Berlin"
