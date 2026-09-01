@@ -101,9 +101,7 @@ docker compose logs -f
 After pulling new changes, rebuild the image and recreate the container to pick them up:
 
 ```bash
-git pull
-docker compose build
-docker compose up -d
+scripts/deploy.sh
 ```
 
 `login` is a one-off: it prompts for your shop email and password, prints the address it emailed,
