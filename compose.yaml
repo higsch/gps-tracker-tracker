@@ -1,0 +1,38 @@
+services:
+  tracker:
+    build:
+      context: .
+      args:
+        # Must match the owner of ./data on the host, or the poller cannot
+        # write. `id -u` / `id -g` -- 1000:1000 for the default Pi user.
+        PUID: "${PUID:-1000}"
+        PGID: "${PGID:-1000}"
+    image: gps-tracker-tracker
+    container_name: gtt
+    command: ["watch"]
+    restart: unless-stopped
+
+    # A poll can spend GTT_REQUEST_TIMEOUT per device before it writes. This
+    # leaves room for the in-flight one to finish rather than being SIGKILLed
+    # partway through, which would leave the DuckDB write lock behind.
+    stop_grace_period: 30s
+
+    environment:
+      GTT_POLL_INTERVAL: "300"
+      GTT_LOG_LEVEL: "INFO"
+      # Only affects log timestamps; everything in the archive is stored UTC.
+      TZ: "Europe/Berlin"
+
+    volumes:
+      # The archive, as a plain file on the Pi -- this is what makes it
+      # readable from outside the container.
+      - ./data:/data
+      # Device tokens written by `login`, mode 0600.
+      - ./config:/config
+
+    # An SD card will not thank you for an unbounded log.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

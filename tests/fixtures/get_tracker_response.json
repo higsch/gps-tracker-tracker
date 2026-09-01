@@ -1,0 +1,55 @@
+{
+  "name": "Test Pet",
+  "serialnumber": "231511297",
+  "additional_parameters": "{\"breed\":[\"Labrador Retriever\",\"Podenco\"],\"isHybrid\":true,\"specialFoods\":[],\"isShowSpecialFood\":false,\"isShowInfoText\":true,\"isSpayed\":false,\"birthday\":\"1-1-2022\",\"idfindefix\":\"\",\"weight\":\"25 kg\",\"activeGender\":\"female\",\"activeFeed\":[\"dry\"],\"idealWeight\":null,\"weightList\":[{\"weight\":\"25 kg\",\"date\":1717594351061}]}",
+  "icon": "http://res.cloudinary.com/iot-venture/image/upload/v1717594357/kyaqq7nfitrdvaoakb8s.jpg",
+  "last_position_accuracy": 15,
+  "last_position_timestamp": "2025-12-02T20:25:30.000+01:00",
+  "last_seen_timestamp": "2025-12-02T20:25:31.000+01:00",
+  "last_seen": "about 2 hours",
+  "last_position": "about 2 hours",
+  "battery": 85,
+  "charging": false,
+  "position": {
+    "lat": 52.520008,
+    "lng": 13.404954,
+    "accuracy": 10,
+    "created_at": "2025-12-02T20:25:31.000+01:00",
+    "sampled_at": "2025-12-02T20:25:30.000+01:00"
+  },
+  "tracker_settings": {
+    "generation": "2.1",
+    "type": "dog",
+    "features": {
+      "flash_light": true,
+      "sleep_mode": true,
+      "live_tracking": false
+    },
+    "sales_channel": null
+  },
+  "led_brightness": {
+    "value": 50,
+    "status": "ok"
+  },
+  "deep_sleep": {
+    "value": 0,
+    "status": "ok"
+  },
+  "energy_saving": {
+    "value": 0,
+    "status": "ok"
+  },
+  "led_activatable": {
+    "has_led": true,
+    "seen_recently": false,
+    "nonempty_battery": true,
+    "not_charging": true,
+    "overall": true
+  },
+  "servicebooking": {
+    "has_current_servicebooking": true,
+    "servicebooking_until": "2026-06-05T00:00:00.000+02:00",
+    "days_until_servicebooking_ends": 184
+  },
+  "inside_geofence": false
+}

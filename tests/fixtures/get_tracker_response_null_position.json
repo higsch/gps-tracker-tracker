@@ -1,0 +1,49 @@
+{
+  "name": "Fresh Tracker",
+  "serialnumber": "999000111",
+  "additional_parameters": null,
+  "icon": null,
+  "last_position_accuracy": null,
+  "last_position_timestamp": null,
+  "last_seen_timestamp": "2026-08-30T09:14:02.000+02:00",
+  "last_seen": "less than a minute",
+  "last_position": null,
+  "battery": 100,
+  "charging": true,
+  "position": null,
+  "tracker_settings": {
+    "generation": "2.1",
+    "type": "dog",
+    "features": {
+      "flash_light": true,
+      "sleep_mode": true,
+      "live_tracking": false
+    },
+    "sales_channel": null
+  },
+  "led_brightness": {
+    "value": 0,
+    "status": "ok"
+  },
+  "deep_sleep": {
+    "value": 0,
+    "status": "ok"
+  },
+  "energy_saving": {
+    "value": 0,
+    "status": "ok"
+  },
+  "led_activatable": {
+    "has_led": true,
+    "seen_recently": true,
+    "nonempty_battery": true,
+    "not_charging": false,
+    "overall": false
+  },
+  "servicebooking": {
+    "has_current_servicebooking": false,
+    "servicebooking_until": null,
+    "days_until_servicebooking_ends": null
+  },
+  "inside_geofence": null
+}

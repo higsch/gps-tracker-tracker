@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. install-launchd.sh substitutes the __PLACEHOLDERS__ and installs the
+  result into ~/Library/LaunchAgents/. Do not load this file directly.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.higsch.gps-tracker-tracker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV_BIN__</string>
+        <string>run</string>
+        <string>--project</string>
+        <string>__PROJECT_DIR__</string>
+        <string>gtt</string>
+        <string>poll</string>
+    </array>
+
+    <!-- Also makes the project's .env visible to the poller. -->
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <!-- launchd fires a missed interval shortly after wake, so laptop sleep
+         leaves a gap in the track rather than a stuck agent. -->
+    <key>StartInterval</key>
+    <integer>__INTERVAL__</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/poller.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/poller.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GTT_DB_PATH</key>
+        <string>__DB_PATH__</string>
+        <key>GTT_CREDENTIALS_PATH</key>
+        <string>__CREDENTIALS_PATH__</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

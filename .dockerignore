@@ -1,0 +1,27 @@
+# Keep the build context small, and keep secrets and the archive out of the
+# image entirely. The container is configured through compose, not .env.
+.env
+.env.*
+!.env.example
+
+data/
+config/
+logs/
+*.duckdb
+*.duckdb.lock
+*.duckdb.wal
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.git/
+.gitignore
+tests/
+scripts/
+Dockerfile
+compose.yaml
+.dockerignore

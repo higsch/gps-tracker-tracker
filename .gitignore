@@ -1,0 +1,20 @@
+# The position archive itself, plus DuckDB's lock/WAL sidecars.
+data/
+*.duckdb
+*.duckdb.wal
+*.duckdb.lock
+
+# Poller output
+logs/
+
+# Secrets: shop credentials and the long-lived device tokens.
+.env
+credentials.json
+# Bind-mounted into the container by compose.yaml.
+config/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/

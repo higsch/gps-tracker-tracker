@@ -1,0 +1,37 @@
+[project]
+name = "gps-tracker-tracker"
+version = "0.1.0"
+description = "Poll a Fressnapf pet GPS tracker and archive its position history in DuckDB"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fressnapftracker>=0.3.0,<0.4",
+    # Already pulled in by fressnapftracker, but `login` drives the sign-in
+    # requests itself (see auth.request_magic_link), so depend on it directly.
+    "httpx>=0.27",
+    "duckdb>=1.5,<2",
+    # duckdb's Python client requires pytz to hand TIMESTAMPTZ values back as
+    # timezone-aware datetimes, which `gtt stats` and `gtt export` both do.
+    "pytz>=2024.1",
+]
+
+[project.scripts]
+gtt = "gps_tracker_tracker.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gps_tracker_tracker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
