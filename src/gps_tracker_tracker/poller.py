@@ -23,7 +23,7 @@ from fressnapftracker.exceptions import (
 
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
-from .store import log_poll, open_store, write_snapshot
+from .store import acquire_write_lock, log_poll, write_connection, write_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -156,8 +156,10 @@ async def _fetch_all(
 def poll_once(config: Config) -> PollResult:
     """Fetch every known tracker once and persist the results.
 
-    The database lock is taken *before* the HTTP calls so that an overlapping
-    launchd tick skips without touching the API at all.
+    The write lock is taken *before* the HTTP calls so that an overlapping
+    launchd tick skips without touching the API at all -- but the duckdb
+    connection itself is only opened afterwards, for the write, so it is never
+    held open for the duration of the fetches.
 
     Raises:
         NoCredentialsError: `gtt login` has not been run.
@@ -167,23 +169,24 @@ def poll_once(config: Config) -> PollResult:
     credentials = load_credentials(config.credentials_path)
     result = PollResult()
 
-    with open_store(config.db_path) as conn:
+    with acquire_write_lock(config.db_path):
         outcomes = asyncio.run(_fetch_all(credentials, config.request_timeout))
         now = datetime.now(UTC)
-        for outcome in outcomes:
-            if outcome.ok and outcome.payload is not None:
-                outcome.new_position = write_snapshot(
-                    conn, outcome.serialnumber, outcome.payload, now=now
+        with write_connection(config.db_path) as conn:
+            for outcome in outcomes:
+                if outcome.ok and outcome.payload is not None:
+                    outcome.new_position = write_snapshot(
+                        conn, outcome.serialnumber, outcome.payload, now=now
+                    )
+                log_poll(
+                    conn,
+                    serialnumber=outcome.serialnumber,
+                    ok=outcome.ok,
+                    error=outcome.error,
+                    new_positions=1 if outcome.new_position else 0,
+                    duration_ms=outcome.duration_ms,
+                    now=now,
                 )
-            log_poll(
-                conn,
-                serialnumber=outcome.serialnumber,
-                ok=outcome.ok,
-                error=outcome.error,
-                new_positions=1 if outcome.new_position else 0,
-                duration_ms=outcome.duration_ms,
-                now=now,
-            )
-            result.outcomes.append(outcome)
+                result.outcomes.append(outcome)
 
     return result

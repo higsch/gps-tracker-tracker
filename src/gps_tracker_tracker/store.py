@@ -85,19 +85,13 @@ def _connect_with_retry(
 
 
 @contextlib.contextmanager
-def open_store(db_path: Path, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open the archive, applying the schema on write connections.
+def _hold_lock(db_path: Path, *, read_only: bool) -> Iterator[None]:
+    """Take the advisory flock without opening a duckdb connection.
 
-    Raises:
-        StoreBusyError: another poller holds the lock.
-        DatabaseMissingError: read_only was requested but no database exists yet.
-
+    Split out from `open_store` so `poll_once` can hold the exclusive lock
+    across its HTTP fetches -- to skip an overlapping tick before touching the
+    API -- without also keeping a duckdb connection open for that whole time.
     """
-    if read_only and not db_path.exists():
-        raise DatabaseMissingError(
-            f"no database at {db_path} -- run `gtt poll` at least once first"
-        )
-
     db_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = db_path.with_name(db_path.name + ".lock")
     lock_mode = fcntl.LOCK_SH if read_only else fcntl.LOCK_EX
@@ -110,23 +104,72 @@ def open_store(db_path: Path, *, read_only: bool = False) -> Iterator[duckdb.Duc
                 f"another gps-tracker-tracker process is using {db_path}"
             ) from exc
         try:
-            conn = _connect_with_retry(db_path, read_only=read_only)
-            try:
-                # Deterministic rendering of TIMESTAMPTZ regardless of the host's zone.
-                conn.execute("SET TimeZone='UTC'")
-                if not read_only:
-                    for statement in _split_statements(_load_schema()):
-                        conn.execute(statement)
-                    conn.execute(
-                        "INSERT INTO schema_meta VALUES ('schema_version', ?) "
-                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                        [SCHEMA_VERSION],
-                    )
-                yield conn
-            finally:
-                conn.close()
+            yield
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _connect(db_path: Path, *, read_only: bool) -> Iterator[duckdb.DuckDBPyConnection]:
+    """Open a duckdb connection for the duration of the `with` block only."""
+    conn = _connect_with_retry(db_path, read_only=read_only)
+    try:
+        # Deterministic rendering of TIMESTAMPTZ regardless of the host's zone.
+        conn.execute("SET TimeZone='UTC'")
+        if not read_only:
+            for statement in _split_statements(_load_schema()):
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO schema_meta VALUES ('schema_version', ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [SCHEMA_VERSION],
+            )
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def open_store(db_path: Path, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
+    """Open the archive, applying the schema on write connections.
+
+    Holds the lock and the connection for the duration of the `with` block --
+    fine for a single quick read or write. `poll_once` uses `acquire_write_lock`
+    and `write_connection` separately instead, so the connection itself is only
+    open around the write, not across its HTTP fetches too.
+
+    Raises:
+        StoreBusyError: another poller holds the lock.
+        DatabaseMissingError: read_only was requested but no database exists yet.
+
+    """
+    if read_only and not db_path.exists():
+        raise DatabaseMissingError(
+            f"no database at {db_path} -- run `gtt poll` at least once first"
+        )
+
+    with _hold_lock(db_path, read_only=read_only):
+        with _connect(db_path, read_only=read_only) as conn:
+            yield conn
+
+
+def acquire_write_lock(db_path: Path) -> contextlib.AbstractContextManager[None]:
+    """Take the exclusive lock without opening a connection.
+
+    Meant to wrap `poll_once`'s HTTP fetches: an overlapping poller sees
+    `StoreBusyError` immediately, before it spends time on the API, but the
+    duckdb connection itself is opened separately (`write_connection`) only
+    once there is something to write.
+    """
+    return _hold_lock(db_path, read_only=False)
+
+
+def write_connection(db_path: Path) -> contextlib.AbstractContextManager[duckdb.DuckDBPyConnection]:
+    """Open a write connection for the duration of the `with` block only.
+
+    Assumes the caller already holds the write lock (see `acquire_write_lock`).
+    """
+    return _connect(db_path, read_only=False)
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
