@@ -190,7 +190,7 @@ variables win). See [.env.example](.env.example).
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |
 | `GTT_LIVE_TRACKING` | `1` | Request live mode while the tracker is moving, see [Live tracking](#live-tracking) |
-| `GTT_LIVE_MOTION_METRES` | `30` | Displacement that counts as motion (also never below the fix's accuracy radius) |
+| `GTT_LIVE_MOTION_METRES` | `10` | Displacement that counts as motion (also never below the fix's accuracy radius) |
 | `GTT_LIVE_MOTION_WINDOW` | `180` | Seconds back a new fix is compared against, so a pause mid-walk is not "stopped" |
 | `FRESSNAPF_EMAIL` / `FRESSNAPF_PASSWORD` | — | `login` only; prompted if unset |
 

@@ -13,7 +13,7 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LIVE_TRACKING = True
 # A fix has to land this far from a recent one to count as motion. Stationary GPS
 # jitter is well under this; a cat walking for 20s covers it easily.
-DEFAULT_LIVE_MOTION_METRES = 30
+DEFAULT_LIVE_MOTION_METRES = 10
 # How far back (seconds) the fixes a new one is compared with may reach. Wide
 # enough that a short pause mid-walk does not read as "stopped".
 DEFAULT_LIVE_MOTION_WINDOW = 180
