@@ -57,6 +57,23 @@ which produces accuracy radii in the hundreds of metres and badly inflates any d
 Exit codes: `0` success (including a skipped poll), `1` transient failure, `2` authentication
 rejected — re-run `gtt login`, `3` no credentials yet.
 
+### Live tracking
+
+The tracker reports a fix about every ten minutes while it sits still and every ~20 seconds
+while it moves, but it only keeps that cadence up for a short burst. The app's *Live-Tracking*
+button is a single call, `PUT /devices/{serial}/enable_live_tracking`, that puts the device into
+a ten-minute live mode of a fix every ~20 seconds. There is no "off" call; it just expires.
+
+Both `poll` and `watch` use that call, gated on motion: when a fix lands more than
+`GTT_LIVE_MOTION_METRES` from the fixes just before it, live mode is requested, and it is
+renewed two minutes before it runs out — *only if the newest fixes still show motion*. A pet that
+has settled down therefore drops back to the normal cadence within ten minutes on its own. Live
+mode drains a full battery in about ten hours, which is why it is not simply left on.
+
+Every request is recorded in `live_tracking_log` with the displacement that justified it.
+Set `GTT_LIVE_TRACKING=0` to turn the feature off. To actually catch 20-second fixes, poll at
+`GTT_POLL_INTERVAL=30`, as the Docker setup does.
+
 ### Run it on a schedule
 
 ```bash
@@ -172,6 +189,9 @@ variables win). See [.env.example](.env.example).
 | `GTT_REQUEST_TIMEOUT` | `10` | HTTP timeout per request |
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |
+| `GTT_LIVE_TRACKING` | `1` | Request live mode while the tracker is moving, see [Live tracking](#live-tracking) |
+| `GTT_LIVE_MOTION_METRES` | `30` | Displacement that counts as motion (also never below the fix's accuracy radius) |
+| `GTT_LIVE_MOTION_WINDOW` | `180` | Seconds back a new fix is compared against, so a pause mid-walk is not "stopped" |
 | `FRESSNAPF_EMAIL` / `FRESSNAPF_PASSWORD` | — | `login` only; prompted if unset |
 
 ## Schema
@@ -185,6 +205,7 @@ All timestamps are `TIMESTAMPTZ` stored in UTC. See [schema.sql](src/gps_tracker
 | `raw_snapshots` | one distinct response | PK `(serialnumber, payload_hash)` — verbatim JSON |
 | `devices` | one tracker | Name, type, generation |
 | `poll_log` | one poll attempt | Success/failure, duration — explains gaps |
+| `live_tracking_log` | one live-mode request | Whether the server accepted it, and the motion that triggered it |
 
 Every insert is `ON CONFLICT DO NOTHING`, so polling is idempotent: a retry, an overlapping
 schedule, or a stationary tracker can never duplicate a fix.

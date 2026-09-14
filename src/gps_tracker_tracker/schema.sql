@@ -67,3 +67,16 @@ CREATE TABLE IF NOT EXISTS poll_log (
     new_positions INTEGER,
     duration_ms   INTEGER
 );
+
+-- One row per live-tracking request. The API's enable_live_tracking call puts
+-- the device into a 10-minute live mode (a fix every ~20s instead of every ~10
+-- minutes); the poller sends it only while the fixes show motion, and this is
+-- how it knows when the current window runs out. `reason` is the displacement
+-- that justified the request.
+CREATE TABLE IF NOT EXISTS live_tracking_log (
+    requested_at TIMESTAMPTZ NOT NULL,
+    serialnumber VARCHAR NOT NULL,
+    ok           BOOLEAN NOT NULL,
+    message      VARCHAR,
+    reason       VARCHAR
+);

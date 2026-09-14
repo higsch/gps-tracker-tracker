@@ -10,6 +10,16 @@ DEFAULT_POLL_INTERVAL = 300
 DEFAULT_REQUEST_TIMEOUT = 10
 DEFAULT_LOCALE = "de"
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LIVE_TRACKING = True
+# A fix has to land this far from a recent one to count as motion. Stationary GPS
+# jitter is well under this; a cat walking for 20s covers it easily.
+DEFAULT_LIVE_MOTION_METRES = 30
+# How far back (seconds) the fixes a new one is compared with may reach. Wide
+# enough that a short pause mid-walk does not read as "stopped".
+DEFAULT_LIVE_MOTION_WINDOW = 180
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -50,6 +60,17 @@ def _env_str(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, on/off, got {raw!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Resolved runtime configuration."""
@@ -62,6 +83,11 @@ class Config:
     log_level: str
     email: str | None
     password: str | None
+    # Motion-gated live tracking, see live_tracking.py. Defaults here so the
+    # tests' hand-built Configs keep working.
+    live_tracking: bool = DEFAULT_LIVE_TRACKING
+    live_motion_metres: int = DEFAULT_LIVE_MOTION_METRES
+    live_motion_window: int = DEFAULT_LIVE_MOTION_WINDOW
 
     @classmethod
     def from_env(cls, *, dotenv: Path | None = None) -> "Config":
@@ -73,6 +99,12 @@ class Config:
         request_timeout = _env_int("GTT_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
         if request_timeout < 1:
             raise ValueError("GTT_REQUEST_TIMEOUT must be at least 1 second")
+        live_motion_metres = _env_int("GTT_LIVE_MOTION_METRES", DEFAULT_LIVE_MOTION_METRES)
+        if live_motion_metres < 1:
+            raise ValueError("GTT_LIVE_MOTION_METRES must be at least 1 metre")
+        live_motion_window = _env_int("GTT_LIVE_MOTION_WINDOW", DEFAULT_LIVE_MOTION_WINDOW)
+        if live_motion_window < 1:
+            raise ValueError("GTT_LIVE_MOTION_WINDOW must be at least 1 second")
         return cls(
             db_path=_env_path("GTT_DB_PATH", DEFAULT_DB_PATH),
             credentials_path=_env_path("GTT_CREDENTIALS_PATH", DEFAULT_CREDENTIALS_PATH),
@@ -82,4 +114,7 @@ class Config:
             log_level=_env_str("GTT_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
             email=os.environ.get("FRESSNAPF_EMAIL", "").strip() or None,
             password=os.environ.get("FRESSNAPF_PASSWORD") or None,
+            live_tracking=_env_bool("GTT_LIVE_TRACKING", DEFAULT_LIVE_TRACKING),
+            live_motion_metres=live_motion_metres,
+            live_motion_window=live_motion_window,
         )

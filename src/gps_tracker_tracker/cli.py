@@ -81,6 +81,8 @@ def _describe(result: PollResult) -> str:
     for outcome in result.outcomes:
         if outcome.ok:
             state = "new fix" if outcome.new_position else "no new fix"
+            if outcome.live_tracking:
+                state = f"{state}, {outcome.live_tracking}"
             parts.append(f"{outcome.serialnumber}: {state} ({outcome.duration_ms}ms)")
         else:
             parts.append(f"{outcome.serialnumber}: FAILED {outcome.error}")

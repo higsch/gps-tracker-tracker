@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -23,7 +23,16 @@ from fressnapftracker.exceptions import (
 
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
-from .store import acquire_write_lock, log_poll, write_connection, write_snapshot
+from .live_tracking import Fix, LiveTrackingClient, live_tracking_due, motion_reason
+from .store import (
+    acquire_write_lock,
+    last_live_tracking_request,
+    log_live_tracking,
+    log_poll,
+    recent_fixes,
+    write_connection,
+    write_snapshot,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +56,9 @@ class DeviceOutcome:
     payload: dict[str, Any] | None = None
     duration_ms: int = 0
     new_position: bool = False
+    # Human-readable note when this poll asked for live tracking, e.g.
+    # "live tracking enabled (moved 84m in 20s)" or "live tracking failed: ...".
+    live_tracking: str | None = None
 
 
 @dataclass
@@ -153,13 +165,85 @@ async def _fetch_all(
     return [await _fetch_device(credential, request_timeout) for credential in credentials]
 
 
+async def _enable_live_tracking(
+    credential: DeviceCredential, request_timeout: int
+) -> tuple[bool, str]:
+    """Request live mode for one tracker. Returns (ok, server message or error)."""
+    try:
+        async with LiveTrackingClient(
+            serial_number=credential.serialnumber,
+            device_token=credential.token,
+            request_timeout=request_timeout,
+        ) as api:
+            return True, await api.enable_live_tracking()
+    except FressnapfTrackerError as exc:
+        # Includes the API's rate limiter, which answers 429 text/plain "Retry
+        # later" -- the next moving fix simply tries again.
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def _enable_all(
+    requests: list[tuple[DeviceCredential, str]], request_timeout: int
+) -> list[tuple[bool, str]]:
+    return [await _enable_live_tracking(credential, request_timeout) for credential, _ in requests]
+
+
+def _live_tracking_reason(
+    conn: Any, serialnumber: str, config: Config, *, now: datetime
+) -> str | None:
+    """Why this poll should request live tracking for the device, or None.
+
+    Only called once a new fix has been written, so the newest stored fix is the
+    one that just arrived. Skips the motion check entirely while a live window
+    is still running: renewing early would be a wasted request, and *not*
+    renewing when the pet has stopped is the whole point.
+    """
+    if not live_tracking_due(last_live_tracking_request(conn, serialnumber), now=now):
+        return None
+    fixes = [Fix(*row) for row in recent_fixes(conn, serialnumber)]
+    return motion_reason(
+        fixes,
+        threshold_m=config.live_motion_metres,
+        window=timedelta(seconds=config.live_motion_window),
+    )
+
+
+def _request_live_tracking(
+    config: Config,
+    credentials: dict[str, DeviceCredential],
+    wanted: list[tuple[DeviceOutcome, str]],
+) -> None:
+    """Send the live-tracking requests and record what came back."""
+    requests = [(credentials[outcome.serialnumber], reason) for outcome, reason in wanted]
+    responses = asyncio.run(_enable_all(requests, config.request_timeout))
+    now = datetime.now(UTC)
+    with write_connection(config.db_path) as conn:
+        for (outcome, reason), (ok, message) in zip(wanted, responses, strict=True):
+            log_live_tracking(
+                conn,
+                serialnumber=outcome.serialnumber,
+                ok=ok,
+                message=message,
+                reason=reason,
+                now=now,
+            )
+            if ok:
+                outcome.live_tracking = f"live tracking enabled ({reason})"
+                log.info("%s: %s -- %s", outcome.serialnumber, reason, message)
+            else:
+                outcome.live_tracking = f"live tracking failed: {message}"
+                log.warning("%s: %s, but live tracking failed: %s", outcome.serialnumber, reason, message)
+
+
 def poll_once(config: Config) -> PollResult:
     """Fetch every known tracker once and persist the results.
 
     The write lock is taken *before* the HTTP calls so that an overlapping
     launchd tick skips without touching the API at all -- but the duckdb
     connection itself is only opened afterwards, for the write, so it is never
-    held open for the duration of the fetches.
+    held open for the duration of the fetches. The same goes for the
+    live-tracking request: decided with the connection open, sent after it is
+    closed, and its outcome written through a second short-lived connection.
 
     Raises:
         NoCredentialsError: `gtt login` has not been run.
@@ -168,6 +252,7 @@ def poll_once(config: Config) -> PollResult:
     """
     credentials = load_credentials(config.credentials_path)
     result = PollResult()
+    wanted: list[tuple[DeviceOutcome, str]] = []
 
     with acquire_write_lock(config.db_path):
         outcomes = asyncio.run(_fetch_all(credentials, config.request_timeout))
@@ -187,6 +272,15 @@ def poll_once(config: Config) -> PollResult:
                     duration_ms=outcome.duration_ms,
                     now=now,
                 )
+                if config.live_tracking and outcome.new_position:
+                    reason = _live_tracking_reason(conn, outcome.serialnumber, config, now=now)
+                    if reason:
+                        wanted.append((outcome, reason))
                 result.outcomes.append(outcome)
+
+        if wanted:
+            _request_live_tracking(
+                config, {c.serialnumber: c for c in credentials}, wanted
+            )
 
     return result

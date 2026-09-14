@@ -9,6 +9,7 @@ import pytest
 
 from gps_tracker_tracker.cli import parse_since
 from gps_tracker_tracker.store import (
+    SCHEMA_VERSION,
     DatabaseMissingError,
     StoreBusyError,
     open_store,
@@ -163,7 +164,7 @@ def test_schema_survives_reopening(db_path: Path, payload: dict) -> None:
         (version,) = conn.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()
-        assert version == "1"
+        assert version == SCHEMA_VERSION
 
 
 def test_read_only_before_the_database_exists(db_path: Path) -> None:

@@ -27,7 +27,7 @@ import duckdb
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # Fields that change on their own between polls: the API renders two of them as
 # human-readable relative strings ("about 2 hours") and counts the third down
@@ -389,3 +389,49 @@ def write_snapshot(
     insert_raw_snapshot(conn, serialnumber, payload, now=now)
     insert_device_state(conn, serialnumber, payload, now=now)
     return insert_position(conn, serialnumber, payload, now=now)
+
+
+def recent_fixes(
+    conn: duckdb.DuckDBPyConnection, serialnumber: str, *, limit: int = 60
+) -> list[tuple[datetime, float, float, int | None]]:
+    """The newest fixes as (sampled_at, lat, lng, accuracy), newest first."""
+    return conn.execute(
+        """
+        SELECT sampled_at, lat, lng, accuracy
+        FROM positions
+        WHERE serialnumber = ?
+        ORDER BY sampled_at DESC
+        LIMIT ?
+        """,
+        [serialnumber, limit],
+    ).fetchall()
+
+
+def last_live_tracking_request(
+    conn: duckdb.DuckDBPyConnection, serialnumber: str
+) -> datetime | None:
+    """When live tracking was last switched on successfully, if ever."""
+    (requested_at,) = conn.execute(
+        "SELECT max(requested_at) FROM live_tracking_log WHERE serialnumber = ? AND ok",
+        [serialnumber],
+    ).fetchone()
+    return requested_at
+
+
+def log_live_tracking(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    serialnumber: str,
+    ok: bool,
+    message: str | None,
+    reason: str,
+    now: datetime,
+) -> None:
+    """Append an audit row for one live-tracking request."""
+    conn.execute(
+        """
+        INSERT INTO live_tracking_log (requested_at, serialnumber, ok, message, reason)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [now, serialnumber, ok, message, reason],
+    )
