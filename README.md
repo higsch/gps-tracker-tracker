@@ -3,8 +3,8 @@
 Polls a **Fressnapf pet GPS tracker** and archives every position it reports into a
 [DuckDB](https://duckdb.org) database.
 
-The tracker's cloud API only ever returns the *current* position — there is no history endpoint.
-So this tool doesn't mirror a remote archive, **it is the archive**: it polls on a schedule and
+The tracker's cloud API returns the *current* position and, undocumented, at most the last 24 hours
+(see [docs/api.md](docs/api.md)). So this tool doesn't mirror a remote archive, **it is the archive**: it polls on a schedule and
 deduplicates on the GPS fix time. Nothing is retroactive, the track starts the day you start
 polling. Since Fressnapf discontinued the product at the end of 2025 with no further development,
 having your own copy is worth something.
@@ -73,6 +73,9 @@ variables empty for around the clock, or `GTT_LIVE_TRACKING=0` to turn the featu
 
 Every request is recorded in `live_tracking_log` (`reason` is `start` or `renew`). To actually
 catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker setup does.
+
+The full route map of the API, including the endpoints this tool does not use yet, is in
+[docs/api.md](docs/api.md).
 
 ### Run it on a schedule
 
