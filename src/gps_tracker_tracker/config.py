@@ -12,6 +12,8 @@ DEFAULT_REQUEST_TIMEOUT = 10
 DEFAULT_LOCALE = "de"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LIVE_TRACKING = True
+# Pull the API's positions history on every poll to fill gaps, see history.py.
+DEFAULT_BACKFILL = True
 # Live mode is only kept running inside this daily window, in UTC. Set both env
 # vars empty for around the clock.
 DEFAULT_LIVE_FROM = "15:00"
@@ -105,6 +107,7 @@ class Config:
     live_tracking: bool = DEFAULT_LIVE_TRACKING
     live_from: time | None = time.fromisoformat(DEFAULT_LIVE_FROM)
     live_until: time | None = time.fromisoformat(DEFAULT_LIVE_UNTIL)
+    backfill: bool = DEFAULT_BACKFILL
 
     @classmethod
     def from_env(cls, *, dotenv: Path | None = None) -> "Config":
@@ -134,4 +137,5 @@ class Config:
             live_tracking=_env_bool("GTT_LIVE_TRACKING", DEFAULT_LIVE_TRACKING),
             live_from=live_from,
             live_until=live_until,
+            backfill=_env_bool("GTT_BACKFILL", DEFAULT_BACKFILL),
         )

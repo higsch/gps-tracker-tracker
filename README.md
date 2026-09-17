@@ -74,6 +74,18 @@ variables empty for around the clock, or `GTT_LIVE_TRACKING=0` to turn the featu
 Every request is recorded in `live_tracking_log` (`reason` is `start` or `renew`). To actually
 catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker setup does.
 
+### Backfill from the position history
+
+The API also serves the last 24 hours of fixes, unsampled, through
+`GET /devices/{serial}/positions?hours_ago=N&sample=false`. Every poll fetches that history and
+inserts whatever the archive does not have yet, so a 30-second poller no longer drops every other
+20-second live fix, and an outage of up to a day heals itself on the first poll afterwards. `N` is
+sized from the newest stored fix: one hour in steady state, up to the server's cap of 24 after a
+gap. History rows carry coordinates and accuracy only, so their `battery` and `inside_geofence`
+are NULL; a fix the poller caught live keeps its richer row. Backfilled fixes count towards
+`new_positions` in `poll_log` and show up as `N backfilled` in the poll output. Set
+`GTT_BACKFILL=0` to turn it off.
+
 The full route map of the API, including the endpoints this tool does not use yet, is in
 [docs/api.md](docs/api.md).
 
@@ -193,6 +205,7 @@ variables win). See [.env.example](.env.example).
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |
 | `GTT_LIVE_TRACKING` | `1` | Keep the tracker in live mode, see [Live tracking](#live-tracking) |
+| `GTT_BACKFILL` | `1` | Fetch the last hours of position history on every poll and fill the gaps, see [Backfill](#backfill-from-the-position-history) |
 | `GTT_LIVE_FROM` / `GTT_LIVE_UNTIL` | `15:00` / `22:00` | Daily window, UTC clock times, in which live mode is kept running; both empty means all day |
 | `FRESSNAPF_EMAIL` / `FRESSNAPF_PASSWORD` | — | `login` only; prompted if unset |
 
@@ -202,7 +215,7 @@ All timestamps are `TIMESTAMPTZ` stored in UTC. See [schema.sql](src/gps_tracker
 
 | Table | Grain | Notes |
 |---|---|---|
-| `positions` | one GPS fix | PK `(serialnumber, sampled_at)` — the track |
+| `positions` | one GPS fix | PK `(serialnumber, sampled_at)` — the track; backfilled rows have NULL battery/geofence |
 | `device_state` | one device report | PK `(serialnumber, observed_at)` — battery, charging, modes |
 | `raw_snapshots` | one distinct response | PK `(serialnumber, payload_hash)` — verbatim JSON |
 | `devices` | one tracker | Name, type, generation |

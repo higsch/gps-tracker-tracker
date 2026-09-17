@@ -28,8 +28,11 @@ SERIAL = "231511297"
 # Mutable so a test can change what the next request returns.
 _response: dict = {}
 _live_response: dict = {}
+_history_response: list | dict = []
+_history_status = 200
 _requests: list[str] = []
 _live_requests: list[str] = []
+_history_requests: list[str] = []
 
 # ~222m north of the fixture's position.
 _WALK_LAT = 52.522008
@@ -39,6 +42,10 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's naming
+        if "/positions?" in self.path:
+            _history_requests.append(self.path)
+            self._send_json(_history_response, status=_history_status)
+            return
         _requests.append(self.path)
         self._send_json(_response)
 
@@ -46,9 +53,9 @@ class _Handler(BaseHTTPRequestHandler):
         _live_requests.append(self.path)
         self._send_json(_live_response)
 
-    def _send_json(self, payload: dict) -> None:
+    def _send_json(self, payload: dict | list, status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -58,12 +65,22 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _stamp(seconds_later: int) -> str:
+    """An API timestamp `seconds_later` after the fixture's fix."""
+    minute, second = divmod(30 + seconds_later, 60)
+    return f"2025-12-02T20:{25 + minute:02d}:{second:02d}.000+01:00"
+
+
 def _move_to(lat: float, *, seconds_later: int) -> None:
     """Make the next response report a new fix `seconds_later` after the fixture's."""
-    minute, second = divmod(30 + seconds_later, 60)
-    stamp = f"2025-12-02T20:{25 + minute:02d}:{second:02d}.000+01:00"
+    stamp = _stamp(seconds_later)
     _response["position"] = dict(_response["position"], lat=lat, sampled_at=stamp)
     _response["last_seen_timestamp"] = stamp
+
+
+def _history_row(lat: float, *, seconds_later: int, accuracy: int = 3) -> dict:
+    """A row as the positions endpoint returns it: strings for the coordinates."""
+    return {"lat": str(lat), "lng": "13.404954", "h_pos_error": accuracy, "created_at": _stamp(seconds_later)}
 
 
 @pytest.fixture
@@ -109,8 +126,12 @@ def reset_state() -> Iterator[None]:
     _response.update(json.loads((FIXTURES / "get_tracker_response.json").read_text()))
     _live_response.clear()
     _live_response.update({"success": True, "message": "Live Tracking enabled for 10 minutes."})
+    global _history_response, _history_status
+    _history_response = []
+    _history_status = 200
     _requests.clear()
     _live_requests.clear()
+    _history_requests.clear()
     yield
 
 
@@ -258,6 +279,78 @@ def test_live_tracking_can_be_switched_off(config: Config, api_server: str) -> N
 
     assert poll_once(config).new_positions == 1
     assert _live_requests == []
+
+
+def test_history_is_requested_for_a_full_day_when_the_archive_is_empty(
+    config: Config, api_server: str
+) -> None:
+    poll_once(config)
+
+    assert len(_history_requests) == 1
+    assert _history_requests[0].startswith(f"/api/pet_tracker/v2/devices/{SERIAL}/positions?")
+    assert "devicetoken=tok-abcd" in _history_requests[0]
+    assert "hours_ago=24" in _history_requests[0]
+    # Every fix, never the server-side thinning.
+    assert "sample=false" in _history_requests[0]
+
+
+def test_history_fixes_fill_the_gaps_and_the_live_fix_keeps_its_row(
+    config: Config, api_server: str
+) -> None:
+    global _history_response
+    _history_response = [
+        _history_row(52.520008, seconds_later=0, accuracy=99),  # same fix as the payload
+        _history_row(52.5203, seconds_later=20),
+        _history_row(52.5206, seconds_later=40),
+    ]
+
+    result = poll_once(config)
+
+    assert result.ok
+    (outcome,) = result.outcomes
+    assert outcome.new_position is True
+    assert outcome.backfilled == 2
+    assert result.new_positions == 3
+
+    with open_store(config.db_path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT lat, accuracy, battery FROM positions ORDER BY sampled_at"
+        ).fetchall()
+        # The live payload's row wins: its accuracy and battery survive the duplicate.
+        assert rows[0] == (52.520008, 10, 85)
+        assert rows[1:] == [(52.5203, 3, None), (52.5206, 3, None)]
+        (new_positions,) = conn.execute("SELECT new_positions FROM poll_log").fetchone()
+        assert new_positions == 3
+
+    # Re-polling the same history adds nothing.
+    assert poll_once(config).new_positions == 0
+
+
+def test_a_failed_history_fetch_does_not_fail_the_poll(config: Config, api_server: str) -> None:
+    global _history_response, _history_status
+    _history_response = {"error": "hours_ago out of range"}
+    _history_status = 400
+
+    result = poll_once(config)
+
+    assert result.ok
+    assert result.new_positions == 1
+    (outcome,) = result.outcomes
+    assert outcome.backfilled == 0
+    assert outcome.history_error is not None
+    assert "hours_ago out of range" in outcome.history_error
+    # The error body must not be mistaken for the tracker payload.
+    assert outcome.payload == _response
+    with open_store(config.db_path, read_only=True) as conn:
+        (payload_text,) = conn.execute("SELECT payload FROM raw_snapshots").fetchone()
+        assert json.loads(payload_text) == _response
+
+
+def test_backfill_can_be_switched_off(config: Config, api_server: str) -> None:
+    config = replace(config, backfill=False)
+
+    assert poll_once(config).new_positions == 1
+    assert _history_requests == []
 
 
 def test_watch_runs_the_requested_number_of_polls(

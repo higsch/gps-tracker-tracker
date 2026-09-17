@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from fressnapftracker import ApiClient
 from fressnapftracker.exceptions import (
     FressnapfTrackerAuthenticationError,
     FressnapfTrackerError,
@@ -23,10 +22,13 @@ from fressnapftracker.exceptions import (
 
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
+from .history import backfill_hours
 from .live_tracking import LiveTrackingClient, in_live_hours, live_tracking_reason
 from .store import (
     acquire_write_lock,
+    insert_history_positions,
     last_live_tracking_request,
+    latest_fix_at,
     log_live_tracking,
     log_poll,
     write_connection,
@@ -55,9 +57,20 @@ class DeviceOutcome:
     payload: dict[str, Any] | None = None
     duration_ms: int = 0
     new_position: bool = False
+    # The positions-history rows fetched alongside the payload (see history.py),
+    # how many hours back they were asked for, how many turned out to be new,
+    # and why the fetch failed if it did. History trouble never fails the poll.
+    history: list[dict[str, Any]] | None = None
+    history_hours: int | None = None
+    history_error: str | None = None
+    backfilled: int = 0
     # Human-readable note when this poll asked for live tracking, e.g.
     # "live tracking enabled (renew)" or "live tracking failed: ...".
     live_tracking: str | None = None
+
+    @property
+    def new_positions(self) -> int:
+        return int(self.new_position) + self.backfilled
 
 
 @dataclass
@@ -72,7 +85,7 @@ class PollResult:
 
     @property
     def new_positions(self) -> int:
-        return sum(1 for o in self.outcomes if o.new_position)
+        return sum(o.new_positions for o in self.outcomes)
 
     @property
     def auth_failure(self) -> bool:
@@ -103,22 +116,40 @@ def _make_capturing_client(sink: list[dict[str, Any]]) -> httpx.AsyncClient:
     return httpx.AsyncClient(event_hooks={"response": [capture]})
 
 
-async def _fetch_device(credential: DeviceCredential, request_timeout: int) -> DeviceOutcome:
-    """Fetch one tracker, converting every failure mode into an outcome."""
+async def _fetch_device(
+    credential: DeviceCredential, request_timeout: int, history_hours: int | None = None
+) -> DeviceOutcome:
+    """Fetch one tracker, converting every failure mode into an outcome.
+
+    With `history_hours` set, the positions history of that many hours is
+    fetched too, through the same client. Its failure is recorded on the
+    outcome but does not fail the poll -- the current fix is the priority.
+    """
     captured: list[dict[str, Any]] = []
+    payload: dict[str, Any] | None = None
+    history: list[dict[str, Any]] | None = None
+    history_error: str | None = None
     started = time.perf_counter()
     log.debug(
         "fetching %s (token %s)", credential.serialnumber, redact(credential.token)
     )
     try:
         async with _make_capturing_client(captured) as http_client:
-            async with ApiClient(
+            async with LiveTrackingClient(
                 serial_number=credential.serialnumber,
                 device_token=credential.token,
                 request_timeout=request_timeout,
                 client=http_client,
             ) as api:
                 tracker = await api.get_tracker()
+                # Pin the raw tracker response now: the hook also captures any
+                # JSON object the history call returns, such as an error body.
+                payload = captured[-1] if captured else None
+                if history_hours:
+                    try:
+                        history = await api.get_positions(hours_ago=history_hours)
+                    except FressnapfTrackerError as exc:
+                        history_error = f"{type(exc).__name__}: {exc}"
     except _AUTH_ERRORS as exc:
         return DeviceOutcome(
             serialnumber=credential.serialnumber,
@@ -137,9 +168,7 @@ async def _fetch_device(credential: DeviceCredential, request_timeout: int) -> D
             duration_ms=_elapsed_ms(started),
         )
 
-    if captured:
-        payload = captured[-1]
-    else:
+    if payload is None:
         log.warning(
             "%s: could not capture the raw response, storing the parsed model instead",
             credential.serialnumber,
@@ -151,6 +180,9 @@ async def _fetch_device(credential: DeviceCredential, request_timeout: int) -> D
         ok=True,
         payload=payload,
         duration_ms=_elapsed_ms(started),
+        history=history,
+        history_hours=history_hours,
+        history_error=history_error,
     )
 
 
@@ -159,9 +191,12 @@ def _elapsed_ms(started: float) -> int:
 
 
 async def _fetch_all(
-    credentials: list[DeviceCredential], request_timeout: int
+    credentials: list[DeviceCredential], request_timeout: int, history_hours: dict[str, int]
 ) -> list[DeviceOutcome]:
-    return [await _fetch_device(credential, request_timeout) for credential in credentials]
+    return [
+        await _fetch_device(credential, request_timeout, history_hours.get(credential.serialnumber))
+        for credential in credentials
+    ]
 
 
 async def _enable_live_tracking(
@@ -237,6 +272,8 @@ def poll_once(config: Config) -> PollResult:
     held open for the duration of the fetches. The same goes for the
     live-tracking request: decided with the connection open, sent after it is
     closed, and its outcome written through a second short-lived connection.
+    The history backfill needs one quick read *before* the fetches, to size its
+    request from the newest stored fix; that too is a connection of its own.
 
     Raises:
         NoCredentialsError: `gtt login` has not been run.
@@ -248,20 +285,44 @@ def poll_once(config: Config) -> PollResult:
     wanted: list[tuple[DeviceOutcome, str]] = []
 
     with acquire_write_lock(config.db_path):
-        outcomes = asyncio.run(_fetch_all(credentials, config.request_timeout))
+        history_hours: dict[str, int] = {}
+        if config.backfill:
+            with write_connection(config.db_path) as conn:
+                now = datetime.now(UTC)
+                history_hours = {
+                    c.serialnumber: backfill_hours(latest_fix_at(conn, c.serialnumber), now=now)
+                    for c in credentials
+                }
+        outcomes = asyncio.run(_fetch_all(credentials, config.request_timeout, history_hours))
         now = datetime.now(UTC)
         with write_connection(config.db_path) as conn:
             for outcome in outcomes:
                 if outcome.ok and outcome.payload is not None:
+                    # The live payload goes first so its richer row (battery,
+                    # geofence) wins over the same fix arriving via history.
                     outcome.new_position = write_snapshot(
                         conn, outcome.serialnumber, outcome.payload, now=now
                     )
+                    if outcome.history is not None:
+                        outcome.backfilled = insert_history_positions(
+                            conn, outcome.serialnumber, outcome.history, now=now
+                        )
+                        if outcome.backfilled:
+                            log.info(
+                                "%s: backfilled %d fixes from the last %dh of history",
+                                outcome.serialnumber, outcome.backfilled, outcome.history_hours,
+                            )
+                    if outcome.history_error:
+                        log.warning(
+                            "%s: positions history failed: %s",
+                            outcome.serialnumber, outcome.history_error,
+                        )
                 log_poll(
                     conn,
                     serialnumber=outcome.serialnumber,
                     ok=outcome.ok,
                     error=outcome.error,
-                    new_positions=1 if outcome.new_position else 0,
+                    new_positions=outcome.new_positions,
                     duration_ms=outcome.duration_ms,
                     now=now,
                 )

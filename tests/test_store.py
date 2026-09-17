@@ -12,6 +12,8 @@ from gps_tracker_tracker.store import (
     SCHEMA_VERSION,
     DatabaseMissingError,
     StoreBusyError,
+    insert_history_positions,
+    latest_fix_at,
     open_store,
     parse_timestamp,
     payload_fingerprint,
@@ -154,6 +156,45 @@ def test_a_moving_tracker_appends_fixes(db_path: Path, payload: dict) -> None:
         assert counts(conn)["device_state"] == 2
         # Still one device: the same tracker moved, it did not multiply.
         assert counts(conn)["devices"] == 1
+
+
+def test_history_rows_fill_gaps_without_overwriting_a_live_fix(db_path: Path, payload: dict) -> None:
+    now = datetime(2026, 9, 17, 12, tzinfo=UTC)
+    serial = payload["serialnumber"]
+    live_fix_at = payload["position"]["sampled_at"]
+    with open_store(db_path) as conn:
+        assert latest_fix_at(conn, serial) is None
+        write_snapshot(conn, serial, payload)
+
+        added = insert_history_positions(
+            conn,
+            serial,
+            [
+                # The fix the poller already has, with a worse accuracy: must not replace it.
+                {"lat": "1.0", "lng": "1.0", "h_pos_error": 50, "created_at": live_fix_at},
+                {"lat": "52.5201", "lng": "13.4050", "h_pos_error": 4, "created_at": "2025-12-02T20:25:50.000+01:00"},
+                {"lat": "52.5202", "lng": "13.4051", "h_pos_error": 2, "created_at": "2025-12-02T20:26:10.000+01:00"},
+                # Garbage the server should never send, skipped rather than fatal.
+                {"lat": None, "lng": "1", "created_at": "2025-12-02T20:26:30.000+01:00"},
+                {"lat": "x", "lng": "1", "created_at": "2025-12-02T20:26:50.000+01:00"},
+                {"lat": "1", "lng": "1", "created_at": None},
+                "not even a dict",
+            ],
+            now=now,
+        )
+        assert added == 2
+
+        rows = conn.execute(
+            "SELECT lat, accuracy, battery, created_at = sampled_at, ingested_at FROM positions ORDER BY sampled_at"
+        ).fetchall()
+        assert rows[0][:3] == (52.520008, 10, 85)
+        assert [r[:3] for r in rows[1:]] == [(52.5201, 4, None), (52.5202, 2, None)]
+        assert all(r[3] for r in rows[1:])
+        assert all(r[4] == now for r in rows[1:])
+
+        assert latest_fix_at(conn, serial) == parse_timestamp("2025-12-02T20:26:10.000+01:00")
+        # Idempotent.
+        assert insert_history_positions(conn, serial, [], now=now) == 0
 
 
 def test_schema_survives_reopening(db_path: Path, payload: dict) -> None:

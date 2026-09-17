@@ -356,6 +356,65 @@ def insert_position(
     )
 
 
+def latest_fix_at(conn: duckdb.DuckDBPyConnection, serialnumber: str) -> datetime | None:
+    """When the newest stored fix of this tracker was sampled, or None if there is none."""
+    (value,) = conn.execute(
+        "SELECT max(sampled_at) FROM positions WHERE serialnumber = ?", [serialnumber]
+    ).fetchone()
+    return value
+
+
+def insert_history_positions(
+    conn: duckdb.DuckDBPyConnection,
+    serialnumber: str,
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> int:
+    """Insert fixes from the positions history endpoint. Returns how many were new.
+
+    History rows carry only coordinates, accuracy (`h_pos_error`) and `created_at`,
+    which the API uses as the fix time here -- battery and geofence state stay
+    NULL. A fix the poller already caught live keeps its richer row, because the
+    insert does nothing on conflict. Malformed rows are skipped, not fatal.
+    """
+    values: list[list[Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sampled_at = parse_timestamp(row.get("created_at"))
+        lat, lng = row.get("lat"), row.get("lng")
+        if sampled_at is None or lat is None or lng is None:
+            log.warning("%s: unusable history row skipped: %r", serialnumber, row)
+            continue
+        try:
+            coordinates = (float(lat), float(lng))
+        except (TypeError, ValueError):
+            log.warning("%s: unusable history row skipped: %r", serialnumber, row)
+            continue
+        values.append([serialnumber, sampled_at, sampled_at, *coordinates, row.get("h_pos_error"), now])
+    if not values:
+        return 0
+
+    def count() -> int:
+        return conn.execute(
+            "SELECT count(*) FROM positions WHERE serialnumber = ?", [serialnumber]
+        ).fetchone()[0]
+
+    before = count()
+    conn.executemany(
+        """
+        INSERT INTO positions (
+            serialnumber, sampled_at, created_at, lat, lng, accuracy, ingested_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (serialnumber, sampled_at) DO NOTHING
+        """,
+        values,
+    )
+    return count() - before
+
+
 def log_poll(
     conn: duckdb.DuckDBPyConnection,
     *,

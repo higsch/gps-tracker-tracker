@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 
 -- The GPS track. sampled_at is the fix time reported by the tracker, so
--- re-polling a stationary device inserts nothing.
+-- re-polling a stationary device inserts nothing. Rows backfilled from the
+-- API's positions history (see history.py) have NULL battery and
+-- inside_geofence: that endpoint only carries coordinates and accuracy.
 CREATE TABLE IF NOT EXISTS positions (
     serialnumber    VARCHAR NOT NULL,
     sampled_at      TIMESTAMPTZ NOT NULL,

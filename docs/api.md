@@ -65,8 +65,9 @@ Response: a JSON array, oldest first, of
 
 `lat` and `lng` are strings here, unlike in the current-state payload. `h_pos_error` is the
 horizontal accuracy in metres. In live mode the list contains every 20-second fix, so this is the
-route for backfilling anything the poller missed. The app's "cat activity" screen is computed
-client-side from this data; there is no separate activity endpoint.
+route for backfilling anything the poller missed, and the poller does exactly that on every poll
+(see [history.py](../src/gps_tracker_tracker/history.py) and `GTT_BACKFILL`). The app's "cat
+activity" screen is computed client-side from this data; there is no separate activity endpoint.
 
 ### `PUT /enable_live_tracking/` — start or renew live mode — verified
 

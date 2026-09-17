@@ -20,7 +20,9 @@ The route was taken from the app's bundle; the upstream client does not know it.
 
 import logging
 from datetime import UTC, datetime, time, timedelta
+from typing import Any
 
+import fressnapftracker.fressnapftracker as upstream
 from fressnapftracker import ApiClient
 from fressnapftracker.exceptions import FressnapfTrackerError
 
@@ -66,7 +68,31 @@ def live_tracking_reason(last_requested_at: datetime | None, *, now: datetime) -
 
 
 class LiveTrackingClient(ApiClient):
-    """The upstream device client plus the one call it is missing."""
+    """The upstream device client plus the calls it is missing."""
+
+    async def get_positions(self, *, hours_ago: int, sample: bool = False) -> list[dict[str, Any]]:
+        """The fixes of the last `hours_ago` hours (at most 24), oldest first.
+
+        Each is `{"lat": "53.45", "lng": "9.94", "h_pos_error": 2, "created_at": ...}`
+        -- coordinates as strings, accuracy in metres. `sample=True` asks the
+        server to thin the list to roughly one fix a minute; the poller never
+        does, it wants every fix. See history.py.
+        """
+        # Built by hand rather than through _device_request so that the extra
+        # query parameters travel alongside devicetoken. API_BASE_URL is read at
+        # call time on purpose: the tests point it at a local server.
+        url = f"{upstream.API_BASE_URL}/devices/{self._serial_number}/positions"
+        params = {
+            "devicetoken": self._device_token,
+            "hours_ago": hours_ago,
+            "sample": "true" if sample else "false",
+        }
+        result = await self._request("GET", url, self._get_device_headers(), params=params)
+        if isinstance(result, dict):
+            # {"error": ...} for a bad hours_ago or token; anything else is unexpected.
+            self._handle_device_error(result)
+            raise FressnapfTrackerError(f"unexpected positions response: {result!r}")
+        return result
 
     async def enable_live_tracking(self) -> str:
         """Ask the server to put the device into live mode. Returns its message."""

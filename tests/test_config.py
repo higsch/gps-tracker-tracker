@@ -58,3 +58,12 @@ def test_bad_live_hours_are_rejected(
     monkeypatch.setenv("GTT_LIVE_UNTIL", end)
     with pytest.raises(ValueError, match=complaint):
         Config.from_env(dotenv=no_dotenv)
+
+
+def test_backfill_is_on_by_default_and_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch, no_dotenv: Path
+) -> None:
+    monkeypatch.delenv("GTT_BACKFILL", raising=False)
+    assert Config.from_env(dotenv=no_dotenv).backfill is True
+    monkeypatch.setenv("GTT_BACKFILL", "0")
+    assert Config.from_env(dotenv=no_dotenv).backfill is False
