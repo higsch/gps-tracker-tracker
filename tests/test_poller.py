@@ -9,6 +9,7 @@ import json
 import threading
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -95,6 +96,10 @@ def config(tmp_path: Path) -> Config:
         log_level="INFO",
         email=None,
         password=None,
+        # These tests run at whatever hour CI happens to be; the window itself is
+        # covered in test_live_tracking.py.
+        live_from=None,
+        live_until=None,
     )
 
 
@@ -233,6 +238,18 @@ def test_a_failed_fetch_does_not_request_live_tracking(config: Config, api_serve
     result = poll_once(config)
 
     assert not result.ok
+    assert _live_requests == []
+
+
+def test_live_tracking_is_not_requested_outside_the_live_hours(
+    config: Config, api_server: str
+) -> None:
+    # A one-hour window that started two hours ago, whatever the hour is now.
+    start = (datetime.now(UTC) - timedelta(hours=2)).time().replace(second=0, microsecond=0)
+    end = time((start.hour + 1) % 24, start.minute)
+    config = replace(config, live_from=start, live_until=end)
+
+    assert poll_once(config).new_positions == 1
     assert _live_requests == []
 
 

@@ -8,15 +8,18 @@ still and in bursts of one every ~20s while it moves. The Fressnapf app's
 
 -- which puts the device into a 10-minute live mode of a fix every ~20s. There
 is no disable call; the mode simply expires. While `Config.live_tracking` is on
-the poller keeps that mode running continuously: it requests live mode on the
-first poll and again shortly before every window runs out. Live mode drains a
-full battery in about ten hours, so switch the feature off when that matters.
+the poller keeps that mode running throughout a daily window of UTC clock times
+(`Config.live_from` to `Config.live_until`, 15:00-22:00 by default): it requests
+live mode on the first poll inside the window and again shortly before every
+ten-minute grant runs out. Outside the window it stops renewing, so live mode
+dies on its own within ten minutes. Live mode drains a full battery in about ten
+hours, which is what the window is for.
 
 The route was taken from the app's bundle; the upstream client does not know it.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 from fressnapftracker import ApiClient
 from fressnapftracker.exceptions import FressnapfTrackerError
@@ -27,6 +30,20 @@ log = logging.getLogger(__name__)
 # interval of up to ~90s, plus the request itself, never leaves a gap.
 LIVE_TRACKING_DURATION = timedelta(minutes=10)
 RENEW_AFTER = timedelta(minutes=8)
+
+
+def in_live_hours(now: datetime, *, start: time | None, end: time | None) -> bool:
+    """Whether `now` falls inside the daily [start, end) window of UTC clock times.
+
+    No bound on either side means always. A window with end before start
+    wraps past midnight, e.g. 22:00-03:00.
+    """
+    if start is None or end is None:
+        return True
+    clock = now.astimezone(UTC).time()
+    if start < end:
+        return start <= clock < end
+    return clock >= start or clock < end
 
 
 def live_tracking_due(last_requested_at: datetime | None, *, now: datetime) -> bool:

@@ -23,7 +23,7 @@ from fressnapftracker.exceptions import (
 
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
-from .live_tracking import LiveTrackingClient, live_tracking_reason
+from .live_tracking import LiveTrackingClient, in_live_hours, live_tracking_reason
 from .store import (
     acquire_write_lock,
     last_live_tracking_request,
@@ -187,12 +187,17 @@ async def _enable_all(
     return [await _enable_live_tracking(credential, request_timeout) for credential, _ in requests]
 
 
-def _live_tracking_reason(conn: Any, serialnumber: str, *, now: datetime) -> str | None:
+def _live_tracking_reason(
+    conn: Any, serialnumber: str, config: Config, *, now: datetime
+) -> str | None:
     """Why this poll should request live tracking for the device, or None.
 
-    None while a live window is still running: renewing early would be a wasted
-    request, and the API rate-limits them.
+    None outside the configured daily hours -- a running grant is then simply
+    left to expire -- and while a grant is still running: renewing early would
+    be a wasted request, and the API rate-limits them.
     """
+    if not in_live_hours(now, start=config.live_from, end=config.live_until):
+        return None
     return live_tracking_reason(last_live_tracking_request(conn, serialnumber), now=now)
 
 
@@ -261,7 +266,7 @@ def poll_once(config: Config) -> PollResult:
                     now=now,
                 )
                 if config.live_tracking and outcome.ok:
-                    reason = _live_tracking_reason(conn, outcome.serialnumber, now=now)
+                    reason = _live_tracking_reason(conn, outcome.serialnumber, config, now=now)
                     if reason:
                         wanted.append((outcome, reason))
                 result.outcomes.append(outcome)

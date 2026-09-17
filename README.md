@@ -64,10 +64,12 @@ while it moves, but it only keeps that cadence up for a short burst. The app's *
 button is a single call, `PUT /devices/{serial}/enable_live_tracking`, that puts the device into
 a ten-minute live mode of a fix every ~20 seconds. There is no "off" call; it just expires.
 
-Both `poll` and `watch` use that call to keep live mode running: it is requested on the first
-successful poll and renewed two minutes before each window runs out, for as long as the poller
-runs. Live mode drains a full battery in about ten hours, so set `GTT_LIVE_TRACKING=0` when
-that matters.
+Both `poll` and `watch` use that call to keep live mode running during a daily window,
+`GTT_LIVE_FROM` to `GTT_LIVE_UNTIL` in UTC (default 15:00–22:00): it is requested on the first
+successful poll inside the window and renewed two minutes before each ten-minute grant runs
+out. Outside the window nothing is renewed, so live mode expires on its own within ten minutes.
+Live mode drains a full battery in about ten hours, which is what the window is for. Set both
+variables empty for around the clock, or `GTT_LIVE_TRACKING=0` to turn the feature off.
 
 Every request is recorded in `live_tracking_log` (`reason` is `start` or `renew`). To actually
 catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker setup does.
@@ -188,6 +190,7 @@ variables win). See [.env.example](.env.example).
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |
 | `GTT_LIVE_TRACKING` | `1` | Keep the tracker in live mode, see [Live tracking](#live-tracking) |
+| `GTT_LIVE_FROM` / `GTT_LIVE_UNTIL` | `15:00` / `22:00` | Daily window, UTC clock times, in which live mode is kept running; both empty means all day |
 | `FRESSNAPF_EMAIL` / `FRESSNAPF_PASSWORD` | — | `login` only; prompted if unset |
 
 ## Schema
