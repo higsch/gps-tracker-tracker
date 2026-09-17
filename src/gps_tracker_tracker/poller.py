@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -23,13 +23,12 @@ from fressnapftracker.exceptions import (
 
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
-from .live_tracking import Fix, LiveTrackingClient, live_tracking_due, motion_reason
+from .live_tracking import LiveTrackingClient, live_tracking_reason
 from .store import (
     acquire_write_lock,
     last_live_tracking_request,
     log_live_tracking,
     log_poll,
-    recent_fixes,
     write_connection,
     write_snapshot,
 )
@@ -57,7 +56,7 @@ class DeviceOutcome:
     duration_ms: int = 0
     new_position: bool = False
     # Human-readable note when this poll asked for live tracking, e.g.
-    # "live tracking enabled (moved 84m in 20s)" or "live tracking failed: ...".
+    # "live tracking enabled (renew)" or "live tracking failed: ...".
     live_tracking: str | None = None
 
 
@@ -178,7 +177,7 @@ async def _enable_live_tracking(
             return True, await api.enable_live_tracking()
     except FressnapfTrackerError as exc:
         # Includes the API's rate limiter, which answers 429 text/plain "Retry
-        # later" -- the next moving fix simply tries again.
+        # later" -- the next poll simply tries again.
         return False, f"{type(exc).__name__}: {exc}"
 
 
@@ -188,24 +187,13 @@ async def _enable_all(
     return [await _enable_live_tracking(credential, request_timeout) for credential, _ in requests]
 
 
-def _live_tracking_reason(
-    conn: Any, serialnumber: str, config: Config, *, now: datetime
-) -> str | None:
+def _live_tracking_reason(conn: Any, serialnumber: str, *, now: datetime) -> str | None:
     """Why this poll should request live tracking for the device, or None.
 
-    Only called once a new fix has been written, so the newest stored fix is the
-    one that just arrived. Skips the motion check entirely while a live window
-    is still running: renewing early would be a wasted request, and *not*
-    renewing when the pet has stopped is the whole point.
+    None while a live window is still running: renewing early would be a wasted
+    request, and the API rate-limits them.
     """
-    if not live_tracking_due(last_live_tracking_request(conn, serialnumber), now=now):
-        return None
-    fixes = [Fix(*row) for row in recent_fixes(conn, serialnumber)]
-    return motion_reason(
-        fixes,
-        threshold_m=config.live_motion_metres,
-        window=timedelta(seconds=config.live_motion_window),
-    )
+    return live_tracking_reason(last_live_tracking_request(conn, serialnumber), now=now)
 
 
 def _request_live_tracking(
@@ -272,8 +260,8 @@ def poll_once(config: Config) -> PollResult:
                     duration_ms=outcome.duration_ms,
                     now=now,
                 )
-                if config.live_tracking and outcome.new_position:
-                    reason = _live_tracking_reason(conn, outcome.serialnumber, config, now=now)
+                if config.live_tracking and outcome.ok:
+                    reason = _live_tracking_reason(conn, outcome.serialnumber, now=now)
                     if reason:
                         wanted.append((outcome, reason))
                 result.outcomes.append(outcome)

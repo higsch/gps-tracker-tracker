@@ -30,10 +30,8 @@ _live_response: dict = {}
 _requests: list[str] = []
 _live_requests: list[str] = []
 
-# ~222m north of the fixture's position: unmistakably a walk.
+# ~222m north of the fixture's position.
 _WALK_LAT = 52.522008
-# ~11m: within the 30m default, i.e. GPS jitter on a sleeping pet.
-_JITTER_LAT = 52.520108
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -166,18 +164,7 @@ def test_a_moved_tracker_adds_a_fix(config: Config, api_server: str) -> None:
         assert conn.execute("SELECT count(*) FROM positions").fetchone()[0] == 2
 
 
-def test_the_first_fix_alone_does_not_start_live_tracking(config: Config, api_server: str) -> None:
-    poll_once(config)
-
-    # One fix says nothing about motion, and a stationary re-poll adds no fix at all.
-    poll_once(config)
-    assert _live_requests == []
-
-
-def test_a_walking_tracker_gets_live_tracking(config: Config, api_server: str) -> None:
-    poll_once(config)
-    _move_to(_WALK_LAT, seconds_later=20)
-
+def test_the_first_poll_starts_live_tracking(config: Config, api_server: str) -> None:
     result = poll_once(config)
 
     assert result.ok
@@ -185,8 +172,7 @@ def test_a_walking_tracker_gets_live_tracking(config: Config, api_server: str) -
     assert _live_requests[0].startswith(f"/api/pet_tracker/v2/devices/{SERIAL}/enable_live_tracking")
     assert "devicetoken=tok-abcd" in _live_requests[0]
     (outcome,) = result.outcomes
-    assert outcome.live_tracking is not None
-    assert outcome.live_tracking.startswith("live tracking enabled (moved 222m in 20s)")
+    assert outcome.live_tracking == "live tracking enabled (start)"
 
     with open_store(config.db_path, read_only=True) as conn:
         (ok, message, reason) = conn.execute(
@@ -194,30 +180,27 @@ def test_a_walking_tracker_gets_live_tracking(config: Config, api_server: str) -
         ).fetchone()
         assert ok is True
         assert "10 minutes" in message
-        assert reason == "moved 222m in 20s"
+        assert reason == "start"
 
 
-def test_gps_jitter_is_not_motion(config: Config, api_server: str) -> None:
-    poll_once(config)
-    _move_to(_JITTER_LAT, seconds_later=20)
+def test_live_tracking_is_requested_even_without_a_new_fix(config: Config, api_server: str) -> None:
+    _response["position"] = None
 
     result = poll_once(config)
 
-    assert result.new_positions == 1
-    assert _live_requests == []
-    assert result.outcomes[0].live_tracking is None
+    assert result.ok
+    assert result.new_positions == 0
+    assert len(_live_requests) == 1
 
 
 def test_live_tracking_is_not_re_requested_while_it_is_running(
     config: Config, api_server: str
 ) -> None:
     poll_once(config)
-    _move_to(_WALK_LAT, seconds_later=20)
-    poll_once(config)
     assert len(_live_requests) == 1
 
-    # Still walking 20s later, but the ten-minute window has barely begun.
-    _move_to(_WALK_LAT + 0.002, seconds_later=40)
+    # A new fix 20s later, but the ten-minute window has barely begun.
+    _move_to(_WALK_LAT, seconds_later=20)
     result = poll_once(config)
 
     assert result.new_positions == 1
@@ -230,8 +213,6 @@ def test_a_refused_live_tracking_request_is_recorded_not_fatal(
 ) -> None:
     _live_response.clear()
     _live_response["error"] = "Something else went wrong"
-    poll_once(config)
-    _move_to(_WALK_LAT, seconds_later=20)
 
     result = poll_once(config)
 
@@ -245,10 +226,18 @@ def test_a_refused_live_tracking_request_is_recorded_not_fatal(
         assert "Something else went wrong" in message
 
 
+def test_a_failed_fetch_does_not_request_live_tracking(config: Config, api_server: str) -> None:
+    _response.clear()
+    _response["error"] = "broken"
+
+    result = poll_once(config)
+
+    assert not result.ok
+    assert _live_requests == []
+
+
 def test_live_tracking_can_be_switched_off(config: Config, api_server: str) -> None:
     config = replace(config, live_tracking=False)
-    poll_once(config)
-    _move_to(_WALK_LAT, seconds_later=20)
 
     assert poll_once(config).new_positions == 1
     assert _live_requests == []

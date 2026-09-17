@@ -391,22 +391,6 @@ def write_snapshot(
     return insert_position(conn, serialnumber, payload, now=now)
 
 
-def recent_fixes(
-    conn: duckdb.DuckDBPyConnection, serialnumber: str, *, limit: int = 60
-) -> list[tuple[datetime, float, float, int | None]]:
-    """The newest fixes as (sampled_at, lat, lng, accuracy), newest first."""
-    return conn.execute(
-        """
-        SELECT sampled_at, lat, lng, accuracy
-        FROM positions
-        WHERE serialnumber = ?
-        ORDER BY sampled_at DESC
-        LIMIT ?
-        """,
-        [serialnumber, limit],
-    ).fetchall()
-
-
 def last_live_tracking_request(
     conn: duckdb.DuckDBPyConnection, serialnumber: str
 ) -> datetime | None:
