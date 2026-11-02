@@ -119,6 +119,9 @@ To actually catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker
 
 ### Reading the archive over HTTP
 
+For a client app, [docs/tracker-http-api.md](docs/tracker-http-api.md) is a self-contained integration
+guide covering every route and field.
+
 The same API serves the archive to other apps, so they never need to open the DuckDB file
 themselves. A reader in another process bypasses the poller's lock and can make its writes fail;
 through the API, reads and polls share that lock.
