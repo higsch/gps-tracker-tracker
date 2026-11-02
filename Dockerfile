@@ -53,6 +53,9 @@ USER gtt
 # up out of the mounted archive would be a surprise. Configure via compose.
 WORKDIR /app
 
+# The live-tracking API, see GTT_API_TOKEN.
+EXPOSE 8080
+
 # `gtt watch` traps SIGTERM and finishes the poll in flight before exiting.
 STOPSIGNAL SIGTERM
 

@@ -7,19 +7,31 @@ still and in bursts of one every ~20s while it moves. The Fressnapf app's
     PUT /devices/{serial}/enable_live_tracking?devicetoken=...
 
 -- which puts the device into a 10-minute live mode of a fix every ~20s. There
-is no disable call; the mode simply expires. While `Config.live_tracking` is on
-the poller keeps that mode running throughout a daily window of UTC clock times
-(`Config.live_from` to `Config.live_until`, 15:00-22:00 by default): it requests
-live mode on the first poll inside the window and again shortly before every
-ten-minute grant runs out. Outside the window it stops renewing, so live mode
-dies on its own within ten minutes. Live mode drains a full battery in about ten
-hours, which is what the window is for.
+is no disable call; the mode simply expires.
+
+Whether the poller keeps that mode running is a switch, `LiveSwitch`, flipped
+through the control API (see api.py) and kept in a small JSON file next to the
+database. While it is on, the poller requests live mode on the first poll and
+again shortly before every ten-minute grant runs out. Switching it off only
+stops the renewals, so live mode dies on its own within ten minutes. An
+activation can carry an end time; past it the switch counts as off. Live mode
+drains a full battery in about ten hours.
+
+The switch is a file rather than a table because the poller holds the
+database's exclusive lock for the whole of a poll, HTTP calls included: the API
+could not write to DuckDB without waiting for it, and a one-shot `gtt poll`
+from launchd has to see the switch too.
 
 The route was taken from the app's bundle; the upstream client does not know it.
 """
 
+import json
 import logging
-from datetime import UTC, datetime, time, timedelta
+import os
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import fressnapftracker.fressnapftracker as upstream
@@ -34,18 +46,55 @@ LIVE_TRACKING_DURATION = timedelta(minutes=10)
 RENEW_AFTER = timedelta(minutes=8)
 
 
-def in_live_hours(now: datetime, *, start: time | None, end: time | None) -> bool:
-    """Whether `now` falls inside the daily [start, end) window of UTC clock times.
+@dataclass(frozen=True, slots=True)
+class LiveSwitch:
+    """Whether live mode should be kept running, and until when."""
 
-    No bound on either side means always. A window with end before start
-    wraps past midnight, e.g. 22:00-03:00.
-    """
-    if start is None or end is None:
-        return True
-    clock = now.astimezone(UTC).time()
-    if start < end:
-        return start <= clock < end
-    return clock >= start or clock < end
+    enabled: bool = False
+    # None while enabled means until switched off.
+    until: datetime | None = None
+    changed_at: datetime | None = None
+
+    def active(self, now: datetime) -> bool:
+        return self.enabled and (self.until is None or now < self.until)
+
+
+def load_switch(path: Path) -> LiveSwitch:
+    """The stored switch; off if it was never set or the file is unreadable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        until = data.get("until")
+        changed_at = data.get("changed_at")
+        return LiveSwitch(
+            enabled=data["enabled"] is True,
+            until=datetime.fromisoformat(until) if until else None,
+            changed_at=datetime.fromisoformat(changed_at) if changed_at else None,
+        )
+    except FileNotFoundError:
+        return LiveSwitch()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        # Failing safe: a broken file must not leave the battery draining.
+        log.warning("ignoring unreadable live-tracking switch %s: %s", path, exc)
+        return LiveSwitch()
+
+
+def save_switch(path: Path, switch: LiveSwitch) -> None:
+    """Write the switch atomically, so a concurrent reader never sees half a file."""
+    data = {
+        "enabled": switch.enabled,
+        "until": switch.until.isoformat() if switch.until else None,
+        "changed_at": switch.changed_at.isoformat() if switch.changed_at else None,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def live_tracking_due(last_requested_at: datetime | None, *, now: datetime) -> bool:

@@ -461,6 +461,91 @@ def last_live_tracking_request(
     return requested_at
 
 
+def device_overview(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    trail_since: datetime,
+    heatmap_since: datetime | None,
+    max_accuracy: int | None,
+) -> list[dict[str, Any]]:
+    """Every tracker with its latest state, recent trail and older positions.
+
+    `trail` is every fix since `trail_since`, oldest first, and `current` its
+    last one. `heatmap` is the coordinates from `heatmap_since` up to
+    `trail_since`, so the two never overlap; None for no heatmap. Fixes with an
+    accuracy radius over `max_accuracy` metres are dropped from both, unknown
+    accuracy is kept.
+    """
+    accuracy = "AND (accuracy IS NULL OR accuracy <= $max_accuracy)" if max_accuracy is not None else ""
+    params: dict[str, Any] = {"trail_since": trail_since}
+    if max_accuracy is not None:
+        params["max_accuracy"] = max_accuracy
+
+    devices = conn.execute(
+        """
+        SELECT d.serialnumber, d.name, ls.battery, ls.charging, ls.inside_geofence, ls.observed_at
+        FROM devices d
+        LEFT JOIN (
+            SELECT *, row_number() OVER (PARTITION BY serialnumber ORDER BY observed_at DESC) AS rn
+            FROM device_state
+        ) ls ON ls.serialnumber = d.serialnumber AND ls.rn = 1
+        ORDER BY d.serialnumber
+        """
+    ).fetchall()
+
+    trails: dict[str, list[dict[str, Any]]] = {}
+    for serialnumber, sampled_at, lat, lng, acc in conn.execute(
+        f"""
+        SELECT serialnumber, sampled_at, lat, lng, accuracy
+        FROM positions
+        WHERE sampled_at >= $trail_since {accuracy}
+        ORDER BY serialnumber, sampled_at
+        """,
+        params,
+    ).fetchall():
+        trails.setdefault(serialnumber, []).append(
+            {"sampled_at": sampled_at, "lat": lat, "lng": lng, "accuracy": acc}
+        )
+
+    heatmaps: dict[str, list[dict[str, float]]] = {}
+    if heatmap_since is not None:
+        for serialnumber, lat, lng in conn.execute(
+            f"""
+            SELECT serialnumber, lat, lng
+            FROM positions
+            WHERE sampled_at >= $heatmap_since AND sampled_at < $trail_since {accuracy}
+            """,
+            {**params, "heatmap_since": heatmap_since},
+        ).fetchall():
+            heatmaps.setdefault(serialnumber, []).append({"lat": lat, "lng": lng})
+
+    overview = []
+    for serialnumber, name, battery, charging, inside_geofence, observed_at in devices:
+        trail = trails.get(serialnumber, [])
+        overview.append(
+            {
+                "serialnumber": serialnumber,
+                "name": name,
+                "battery": battery,
+                "charging": charging,
+                "inside_geofence": inside_geofence,
+                "observed_at": observed_at,
+                "trail": trail,
+                "current": trail[-1] if trail else None,
+                "heatmap": heatmaps.get(serialnumber, []),
+            }
+        )
+    return overview
+
+
+def last_live_tracking_grants(conn: duckdb.DuckDBPyConnection) -> dict[str, datetime]:
+    """`last_live_tracking_request` for every tracker that ever had one."""
+    rows = conn.execute(
+        "SELECT serialnumber, max(requested_at) FROM live_tracking_log WHERE ok GROUP BY 1"
+    ).fetchall()
+    return dict(rows)
+
+
 def log_live_tracking(
     conn: duckdb.DuckDBPyConnection,
     *,

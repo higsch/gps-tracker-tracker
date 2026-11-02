@@ -1,6 +1,5 @@
-"""Environment parsing for the live-hours window."""
+"""Environment parsing."""
 
-from datetime import time
 from pathlib import Path
 
 import pytest
@@ -14,50 +13,57 @@ def no_dotenv(tmp_path: Path) -> Path:
     return tmp_path / "absent.env"
 
 
-def test_live_hours_default_to_the_afternoon_and_evening_utc(
-    monkeypatch: pytest.MonkeyPatch, no_dotenv: Path
-) -> None:
-    monkeypatch.delenv("GTT_LIVE_FROM", raising=False)
-    monkeypatch.delenv("GTT_LIVE_UNTIL", raising=False)
+@pytest.fixture
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("GTT_API_TOKEN", "GTT_API_HOST", "GTT_API_PORT", "GTT_LIVE_MAX_MINUTES"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_api_is_off_without_a_token(clean_env: None, no_dotenv: Path) -> None:
     config = Config.from_env(dotenv=no_dotenv)
-    assert (config.live_from, config.live_until) == (time(15), time(22))
+    assert config.api_token is None
+    assert (config.api_host, config.api_port) == ("0.0.0.0", 8080)
+    assert config.live_max_minutes == 600
 
 
-def test_live_hours_are_read_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch, no_dotenv: Path
+def test_api_settings_are_read_from_the_environment(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, no_dotenv: Path
 ) -> None:
-    monkeypatch.setenv("GTT_LIVE_FROM", "06:30")
-    monkeypatch.setenv("GTT_LIVE_UNTIL", "23:15")
+    monkeypatch.setenv("GTT_API_TOKEN", "  s3cret  ")
+    monkeypatch.setenv("GTT_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("GTT_API_PORT", "9000")
+    monkeypatch.setenv("GTT_LIVE_MAX_MINUTES", "120")
     config = Config.from_env(dotenv=no_dotenv)
-    assert (config.live_from, config.live_until) == (time(6, 30), time(23, 15))
-
-
-def test_empty_live_hours_mean_around_the_clock(
-    monkeypatch: pytest.MonkeyPatch, no_dotenv: Path
-) -> None:
-    monkeypatch.setenv("GTT_LIVE_FROM", "")
-    monkeypatch.setenv("GTT_LIVE_UNTIL", "")
-    config = Config.from_env(dotenv=no_dotenv)
-    assert (config.live_from, config.live_until) == (None, None)
+    assert config.api_token == "s3cret"
+    assert (config.api_host, config.api_port) == ("127.0.0.1", 9000)
+    assert config.live_max_minutes == 120
 
 
 @pytest.mark.parametrize(
-    ("start", "end", "complaint"),
+    ("name", "value", "complaint"),
     [
-        ("15:00", "", "set together"),
-        ("", "22:00", "set together"),
-        ("15:00", "15:00", "equal"),
-        ("3pm", "22:00", "clock time"),
-        ("15:00+02:00", "22:00", "always UTC"),
+        ("GTT_API_PORT", "0", "between 1 and 65535"),
+        ("GTT_API_PORT", "70000", "between 1 and 65535"),
+        ("GTT_API_PORT", "http", "integer"),
+        ("GTT_LIVE_MAX_MINUTES", "0", "at least 1"),
     ],
 )
-def test_bad_live_hours_are_rejected(
-    monkeypatch: pytest.MonkeyPatch, no_dotenv: Path, start: str, end: str, complaint: str
+def test_bad_api_settings_are_rejected(
+    clean_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    no_dotenv: Path,
+    name: str,
+    value: str,
+    complaint: str,
 ) -> None:
-    monkeypatch.setenv("GTT_LIVE_FROM", start)
-    monkeypatch.setenv("GTT_LIVE_UNTIL", end)
+    monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=complaint):
         Config.from_env(dotenv=no_dotenv)
+
+
+def test_the_live_switch_sits_next_to_the_database(clean_env: None, monkeypatch: pytest.MonkeyPatch, no_dotenv: Path) -> None:
+    monkeypatch.setenv("GTT_DB_PATH", "/data/tracker.duckdb")
+    assert Config.from_env(dotenv=no_dotenv).live_switch_path == Path("/data/tracker.duckdb.live.json")
 
 
 def test_backfill_is_on_by_default_and_can_be_disabled(

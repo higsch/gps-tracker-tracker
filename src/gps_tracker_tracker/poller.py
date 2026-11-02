@@ -23,7 +23,7 @@ from fressnapftracker.exceptions import (
 from .auth import DeviceCredential, load_credentials, redact
 from .config import Config
 from .history import backfill_hours
-from .live_tracking import LiveTrackingClient, in_live_hours, live_tracking_reason
+from .live_tracking import LiveSwitch, LiveTrackingClient, live_tracking_reason, load_switch
 from .store import (
     acquire_write_lock,
     insert_history_positions,
@@ -223,15 +223,15 @@ async def _enable_all(
 
 
 def _live_tracking_reason(
-    conn: Any, serialnumber: str, config: Config, *, now: datetime
+    conn: Any, serialnumber: str, switch: LiveSwitch, *, now: datetime
 ) -> str | None:
     """Why this poll should request live tracking for the device, or None.
 
-    None outside the configured daily hours -- a running grant is then simply
-    left to expire -- and while a grant is still running: renewing early would
-    be a wasted request, and the API rate-limits them.
+    None while the switch is off or its end time has passed -- a running grant
+    is then simply left to expire -- and while a grant is still running:
+    renewing early would be a wasted request, and the API rate-limits them.
     """
-    if not in_live_hours(now, start=config.live_from, end=config.live_until):
+    if not switch.active(now):
         return None
     return live_tracking_reason(last_live_tracking_request(conn, serialnumber), now=now)
 
@@ -283,6 +283,9 @@ def poll_once(config: Config) -> PollResult:
     credentials = load_credentials(config.credentials_path)
     result = PollResult()
     wanted: list[tuple[DeviceOutcome, str]] = []
+    # Read once per poll. The file is replaced atomically, so this never races
+    # the control API; a flip lands on the next poll, which the API wakes.
+    switch = load_switch(config.live_switch_path)
 
     with acquire_write_lock(config.db_path):
         history_hours: dict[str, int] = {}
@@ -326,8 +329,8 @@ def poll_once(config: Config) -> PollResult:
                     duration_ms=outcome.duration_ms,
                     now=now,
                 )
-                if config.live_tracking and outcome.ok:
-                    reason = _live_tracking_reason(conn, outcome.serialnumber, config, now=now)
+                if outcome.ok:
+                    reason = _live_tracking_reason(conn, outcome.serialnumber, switch, now=now)
                     if reason:
                         wanted.append((outcome, reason))
                 result.outcomes.append(outcome)

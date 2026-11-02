@@ -20,8 +20,14 @@ services:
     environment:
       GTT_POLL_INTERVAL: "30"
       GTT_LOG_LEVEL: "INFO"
+      # The live-tracking API only starts with a token; put it in .env next to
+      # this file. Without one the poller runs as before, live tracking off.
+      GTT_API_TOKEN: "${GTT_API_TOKEN:-}"
       # Only affects log timestamps; everything in the archive is stored UTC.
       TZ: "Europe/Berlin"
+
+    ports:
+      - "8080:8080"
 
     volumes:
       # The archive, as a plain file on the Pi -- this is what makes it

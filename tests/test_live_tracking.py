@@ -5,8 +5,8 @@ happens eight or ten minutes into a live window -- cannot be driven through
 `poll_once` without waiting, so it is exercised here with an injected clock.
 """
 
-from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta, timezone
+import json
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,9 +15,11 @@ from gps_tracker_tracker.config import Config
 from gps_tracker_tracker.live_tracking import (
     LIVE_TRACKING_DURATION,
     RENEW_AFTER,
-    in_live_hours,
+    LiveSwitch,
     live_tracking_due,
     live_tracking_reason,
+    load_switch,
+    save_switch,
 )
 from gps_tracker_tracker.poller import _live_tracking_reason
 from gps_tracker_tracker.store import log_live_tracking, open_store
@@ -42,27 +44,34 @@ def test_reason_distinguishes_a_fresh_window_from_a_renewal() -> None:
     assert live_tracking_reason(now - timedelta(minutes=25), now=now) == "start"
 
 
-def test_live_hours_are_a_half_open_utc_window() -> None:
-    hours = dict(start=time(15), end=time(22))
-    assert not in_live_hours(datetime(2026, 9, 14, 14, 59, 59, tzinfo=UTC), **hours)
-    assert in_live_hours(datetime(2026, 9, 14, 15, 0, tzinfo=UTC), **hours)
-    assert in_live_hours(datetime(2026, 9, 14, 21, 59, 59, tzinfo=UTC), **hours)
-    assert not in_live_hours(datetime(2026, 9, 14, 22, 0, tzinfo=UTC), **hours)
-    # The bounds are UTC no matter what zone the clock is in: 16:30+02:00 is
-    # 14:30Z and still outside, 00:30+02:00 is 22:30Z and already outside.
-    berlin = timezone(timedelta(hours=2))
-    assert not in_live_hours(datetime(2026, 9, 14, 16, 30, tzinfo=berlin), **hours)
-    assert in_live_hours(datetime(2026, 9, 14, 17, 30, tzinfo=berlin), **hours)
-    assert not in_live_hours(datetime(2026, 9, 15, 0, 30, tzinfo=berlin), **hours)
+def test_the_switch_is_active_until_its_end_time() -> None:
+    assert not LiveSwitch().active(T0)
+    assert LiveSwitch(enabled=True).active(T0)
+    timed = LiveSwitch(enabled=True, until=T0 + timedelta(hours=1))
+    assert timed.active(T0)
+    assert timed.active(T0 + timedelta(minutes=59, seconds=59))
+    assert not timed.active(T0 + timedelta(hours=1))
+    assert not LiveSwitch(enabled=False, until=T0 + timedelta(hours=1)).active(T0)
 
 
-def test_live_hours_can_wrap_midnight_or_be_unbounded() -> None:
-    night = dict(start=time(22), end=time(3))
-    assert in_live_hours(datetime(2026, 9, 14, 23, tzinfo=UTC), **night)
-    assert in_live_hours(datetime(2026, 9, 15, 2, 59, tzinfo=UTC), **night)
-    assert not in_live_hours(datetime(2026, 9, 15, 3, tzinfo=UTC), **night)
-    assert not in_live_hours(datetime(2026, 9, 14, 12, tzinfo=UTC), **night)
-    assert in_live_hours(datetime(2026, 9, 14, 12, tzinfo=UTC), start=None, end=None)
+def test_the_switch_round_trips_through_its_file(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "tracker.duckdb.live.json"
+    berlin = timezone(timedelta(hours=1))
+    switch = LiveSwitch(enabled=True, until=T0.astimezone(berlin), changed_at=T0)
+
+    save_switch(path, switch)
+
+    assert load_switch(path) == switch
+    # No temporary files left behind next to it.
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
+def test_a_missing_or_broken_switch_file_means_off(tmp_path: Path) -> None:
+    path = tmp_path / "live.json"
+    assert load_switch(path) == LiveSwitch()
+    for garbage in ("{not json", "[]", json.dumps({"until": None}), json.dumps({"enabled": "yes"})):
+        path.write_text(garbage)
+        assert not load_switch(path).active(T0), garbage
 
 
 # --------------------------------------------------------------------------- #
@@ -86,37 +95,37 @@ def config(tmp_path: Path) -> Config:
     )
 
 
+ON = LiveSwitch(enabled=True)
+
+
 def test_a_running_live_window_is_renewed_only_when_it_is_about_to_end(config: Config) -> None:
     with open_store(config.db_path) as conn:
-        assert _live_tracking_reason(conn, SERIAL, config, now=T0) == "start"
+        assert _live_tracking_reason(conn, SERIAL, ON, now=T0) == "start"
 
         started = T0 + timedelta(seconds=15)
         log_live_tracking(conn, serialnumber=SERIAL, ok=True, message="ok", reason="start", now=started)
 
         # Five minutes in: already live -- nothing to do.
-        assert _live_tracking_reason(conn, SERIAL, config, now=started + timedelta(minutes=5)) is None
+        assert _live_tracking_reason(conn, SERIAL, ON, now=started + timedelta(minutes=5)) is None
         # Eight minutes in: renew before the server lets the window expire.
-        assert _live_tracking_reason(conn, SERIAL, config, now=started + RENEW_AFTER) == "renew"
+        assert _live_tracking_reason(conn, SERIAL, ON, now=started + RENEW_AFTER) == "renew"
         # Long after a poller outage: a fresh window, not a renewal.
-        assert _live_tracking_reason(conn, SERIAL, config, now=started + timedelta(hours=1)) == "start"
+        assert _live_tracking_reason(conn, SERIAL, ON, now=started + timedelta(hours=1)) == "start"
 
 
-def test_nothing_is_requested_or_renewed_outside_the_live_hours(config: Config) -> None:
-    # T0 is 18:00Z, inside the default 15:00-22:00 window.
+def test_nothing_is_requested_or_renewed_while_switched_off(config: Config) -> None:
     with open_store(config.db_path) as conn:
-        assert _live_tracking_reason(conn, SERIAL, config, now=T0.replace(hour=14)) is None
+        assert _live_tracking_reason(conn, SERIAL, LiveSwitch(), now=T0) is None
 
-        # A grant made just before the window closes is left to expire.
-        started = T0.replace(hour=21, minute=55)
-        log_live_tracking(conn, serialnumber=SERIAL, ok=True, message="ok", reason="start", now=started)
-        assert _live_tracking_reason(conn, SERIAL, config, now=started + RENEW_AFTER) is None
-        # ... and the next afternoon starts a fresh one.
-        next_day = (T0 + timedelta(days=1)).replace(hour=15)
-        assert _live_tracking_reason(conn, SERIAL, config, now=next_day) == "start"
-
-        # Without hours, the same moment would have been fine.
-        always = replace(config, live_from=None, live_until=None)
-        assert _live_tracking_reason(conn, SERIAL, always, now=started + RENEW_AFTER) == "renew"
+        # Switched off mid-grant: the grant is left to expire, not renewed.
+        log_live_tracking(conn, serialnumber=SERIAL, ok=True, message="ok", reason="start", now=T0)
+        assert _live_tracking_reason(conn, SERIAL, LiveSwitch(), now=T0 + RENEW_AFTER) is None
+        # Same for an activation whose end time has passed ...
+        ended = LiveSwitch(enabled=True, until=T0 + timedelta(minutes=5))
+        assert _live_tracking_reason(conn, SERIAL, ended, now=T0 + RENEW_AFTER) is None
+        # ... while one still running renews as usual.
+        running = LiveSwitch(enabled=True, until=T0 + timedelta(hours=1))
+        assert _live_tracking_reason(conn, SERIAL, running, now=T0 + RENEW_AFTER) == "renew"
 
 
 def test_a_failed_request_does_not_count_as_a_running_window(config: Config) -> None:
@@ -126,4 +135,4 @@ def test_a_failed_request_does_not_count_as_a_running_window(config: Config) -> 
         )
 
         # The rate limiter said no a moment ago; the next poll tries again.
-        assert _live_tracking_reason(conn, SERIAL, config, now=T0 + timedelta(seconds=50)) == "start"
+        assert _live_tracking_reason(conn, SERIAL, ON, now=T0 + timedelta(seconds=50)) == "start"

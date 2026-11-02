@@ -6,19 +6,23 @@ the reparsed model instead of what the server actually sent.
 """
 
 import json
+import socket
 import threading
+import time as time_module
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import fressnapftracker.fressnapftracker as upstream
+import httpx
 import pytest
 
 from gps_tracker_tracker.auth import DeviceCredential, save_credentials
 from gps_tracker_tracker.cli import EXIT_OK, main
 from gps_tracker_tracker.config import Config
+from gps_tracker_tracker.live_tracking import LiveSwitch, save_switch
 from gps_tracker_tracker.poller import poll_once
 from gps_tracker_tracker.store import open_store
 
@@ -104,7 +108,7 @@ def api_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 def config(tmp_path: Path) -> Config:
     credentials_path = tmp_path / "credentials.json"
     save_credentials(credentials_path, [DeviceCredential(serialnumber=SERIAL, token="tok-abcd")])
-    return Config(
+    config = Config(
         db_path=tmp_path / "tracker.duckdb",
         credentials_path=credentials_path,
         poll_interval=300,
@@ -113,11 +117,11 @@ def config(tmp_path: Path) -> Config:
         log_level="INFO",
         email=None,
         password=None,
-        # These tests run at whatever hour CI happens to be; the window itself is
-        # covered in test_live_tracking.py.
-        live_from=None,
-        live_until=None,
     )
+    # Switched on, as the control API would, so the live-tracking wiring runs;
+    # the off and expired cases override it.
+    save_switch(config.live_switch_path, LiveSwitch(enabled=True))
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -262,20 +266,25 @@ def test_a_failed_fetch_does_not_request_live_tracking(config: Config, api_serve
     assert _live_requests == []
 
 
-def test_live_tracking_is_not_requested_outside_the_live_hours(
-    config: Config, api_server: str
-) -> None:
-    # A one-hour window that started two hours ago, whatever the hour is now.
-    start = (datetime.now(UTC) - timedelta(hours=2)).time().replace(second=0, microsecond=0)
-    end = time((start.hour + 1) % 24, start.minute)
-    config = replace(config, live_from=start, live_until=end)
+def test_live_tracking_is_not_requested_while_switched_off(config: Config, api_server: str) -> None:
+    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
 
     assert poll_once(config).new_positions == 1
     assert _live_requests == []
 
 
-def test_live_tracking_can_be_switched_off(config: Config, api_server: str) -> None:
-    config = replace(config, live_tracking=False)
+def test_live_tracking_is_off_by_default(config: Config, api_server: str) -> None:
+    config.live_switch_path.unlink()
+
+    assert poll_once(config).new_positions == 1
+    assert _live_requests == []
+
+
+def test_live_tracking_is_not_requested_after_the_activation_ran_out(
+    config: Config, api_server: str
+) -> None:
+    ended = datetime.now(UTC) - timedelta(minutes=1)
+    save_switch(config.live_switch_path, LiveSwitch(enabled=True, until=ended))
 
     assert poll_once(config).new_positions == 1
     assert _live_requests == []
@@ -358,6 +367,8 @@ def test_watch_runs_the_requested_number_of_polls(
 ) -> None:
     monkeypatch.setenv("GTT_DB_PATH", str(config.db_path))
     monkeypatch.setenv("GTT_CREDENTIALS_PATH", str(config.credentials_path))
+    # Set but empty, so a token in the repo's own .env cannot start the API here.
+    monkeypatch.setenv("GTT_API_TOKEN", "")
 
     assert main(["watch", "--interval", "1", "--max-iterations", "2"]) == EXIT_OK
 
@@ -365,6 +376,45 @@ def test_watch_runs_the_requested_number_of_polls(
         # Two attempts logged, but the tracker never moved, so only one fix.
         assert conn.execute("SELECT count(*) FROM poll_log").fetchone()[0] == 2
         assert conn.execute("SELECT count(*) FROM positions").fetchone()[0] == 1
+
+
+def test_activating_through_the_api_starts_live_mode_without_waiting_for_the_next_poll(
+    config: Config, api_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("GTT_DB_PATH", str(config.db_path))
+    monkeypatch.setenv("GTT_CREDENTIALS_PATH", str(config.credentials_path))
+    monkeypatch.setenv("GTT_API_TOKEN", "tok")
+    monkeypatch.setenv("GTT_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("GTT_API_PORT", str(port))
+
+    def activate_after_the_first_poll() -> None:
+        deadline = time_module.monotonic() + 10
+        while not _requests and time_module.monotonic() < deadline:
+            time_module.sleep(0.05)
+        while time_module.monotonic() < deadline:
+            try:
+                httpx.post(
+                    f"http://127.0.0.1:{port}/live-tracking/activate",
+                    headers={"Authorization": "Bearer tok"},
+                    timeout=5,
+                ).raise_for_status()
+                return
+            except httpx.TransportError:
+                time_module.sleep(0.05)
+
+    activator = threading.Thread(target=activate_after_the_first_poll, daemon=True)
+    activator.start()
+    started = time_module.monotonic()
+    # A 60s interval: only the wake-up can get the second poll in this quickly.
+    assert main(["watch", "--interval", "60", "--max-iterations", "2"]) == EXIT_OK
+    activator.join(timeout=5)
+
+    assert time_module.monotonic() - started < 30
+    assert len(_live_requests) == 1
 
 
 def test_poll_skips_cleanly_when_another_process_holds_the_lock(

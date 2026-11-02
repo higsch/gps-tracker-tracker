@@ -42,7 +42,9 @@ Polling uses only that token — it never re-authenticates and never needs your 
 
 ```bash
 uv run gtt poll                  # fetch once, append, exit  (what launchd runs)
-uv run gtt watch                 # fetch on a loop, every GTT_POLL_INTERVAL seconds
+uv run gtt watch                 # fetch on a loop, every GTT_POLL_INTERVAL seconds,
+                                 # and serve the HTTP API if GTT_API_TOKEN is set
+uv run gtt watch --no-api        # the loop without the API
 uv run gtt stats                 # what the archive holds
 uv run gtt devices               # known trackers
 uv run gtt export --format geojson > track.geojson
@@ -64,15 +66,89 @@ while it moves, but it only keeps that cadence up for a short burst. The app's *
 button is a single call, `PUT /devices/{serial}/enable_live_tracking`, that puts the device into
 a ten-minute live mode of a fix every ~20 seconds. There is no "off" call; it just expires.
 
-Both `poll` and `watch` use that call to keep live mode running during a daily window,
-`GTT_LIVE_FROM` to `GTT_LIVE_UNTIL` in UTC (default 15:00–22:00): it is requested on the first
-successful poll inside the window and renewed two minutes before each ten-minute grant runs
-out. Outside the window nothing is renewed, so live mode expires on its own within ten minutes.
-Live mode drains a full battery in about ten hours, which is what the window is for. Set both
-variables empty for around the clock, or `GTT_LIVE_TRACKING=0` to turn the feature off.
+Live tracking is off until you switch it on through a small HTTP API that `gtt watch` serves.
+While it is on, both `poll` and `watch` keep live mode running: it is requested on the next
+successful poll and renewed two minutes before each ten-minute grant runs out. Switching it off
+only stops the renewals, so the tracker stays live until the current grant expires, at most ten
+minutes later. Live mode drains a full battery in about ten hours.
 
-Every request is recorded in `live_tracking_log` (`reason` is `start` or `renew`). To actually
-catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker setup does.
+The API starts only when `GTT_API_TOKEN` is set, and every request must carry it as a bearer
+token. Generate one with `openssl rand -hex 32`. It listens on `GTT_API_HOST:GTT_API_PORT`
+(default `0.0.0.0:8080`):
+
+```bash
+TOKEN=...; API=http://raspberrypi.local:8080
+
+curl -H "Authorization: Bearer $TOKEN" $API/live-tracking                      # status
+curl -H "Authorization: Bearer $TOKEN" -X POST $API/live-tracking/activate     # until switched off
+curl -H "Authorization: Bearer $TOKEN" -X POST $API/live-tracking/activate \
+     -H "Content-Type: application/json" -d '{"minutes": 60}'                  # for an hour
+curl -H "Authorization: Bearer $TOKEN" -X POST $API/live-tracking/deactivate
+```
+
+All three return the same document:
+
+```json
+{
+  "enabled": true,
+  "until": "2026-11-02T19:00:00+00:00",
+  "changed_at": "2026-11-02T18:00:00+00:00",
+  "devices": [{"serialnumber": "231511297", "live_until": "2026-11-02T18:10:02+00:00"}]
+}
+```
+
+`until` is `null` for an activation without a duration. `minutes` may be 1 to
+`GTT_LIVE_MAX_MINUTES` (default 600). Live mode can overrun `until` by up to one ten-minute grant.
+`live_until` is when each tracker's current grant runs out, `null` if none is running.
+`devices` is `null` when the database stayed busy with a poll for longer than five seconds.
+
+Activating wakes `watch`, so live mode starts within a second instead of at the next poll. The
+switch lives in a JSON file next to the database (`tracker.duckdb.live.json`), so a launchd-driven
+`gtt poll` respects it too. Without a `watch` running, nothing serves the API, but you can edit
+that file directly.
+
+Errors come back as `{"error": "..."}` with a matching status code: `401` for a missing or wrong
+token, `400` for a bad body or query parameter, `404` for an unknown route, and `405` for the wrong
+method.
+
+The API is plain HTTP. On your home network that is fine; to reach it from outside, put it behind
+a TLS reverse proxy or a VPN rather than forwarding the port.
+
+Every request to the tracker is recorded in `live_tracking_log` (`reason` is `start` or `renew`).
+To actually catch 20-second fixes, poll at `GTT_POLL_INTERVAL=30`, as the Docker setup does.
+
+### Reading the archive over HTTP
+
+The same API serves the archive to other apps, so they never need to open the DuckDB file
+themselves. A reader in another process bypasses the poller's lock and can make its writes fail;
+through the API, reads and polls share that lock.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$API/devices?trail_hours=6&heatmap_days=7&max_accuracy=10"
+```
+
+That returns the [live-tracking status](#live-tracking), the same document
+`GET /live-tracking` returns, and one entry per tracker:
+
+```json
+{
+"live_tracking": {"enabled": true, "until": null, "changed_at": "2026-11-02T17:40:00+00:00",
+                  "devices": [{"serialnumber": "231511297", "live_until": "2026-11-02T18:02:30+00:00"}]},
+"devices": [{
+  "serialnumber": "231511297", "name": "Minka",
+  "battery": 76, "charging": false, "inside_geofence": true, "observed_at": "2026-11-02T18:04:11+00:00",
+  "trail": [{"sampled_at": "2026-11-02T17:55:02+00:00", "lat": 52.52, "lng": 13.40, "accuracy": 3}],
+  "current": {"sampled_at": "2026-11-02T17:55:02+00:00", "lat": 52.52, "lng": 13.40, "accuracy": 3},
+  "heatmap": [{"lat": 52.51, "lng": 13.41}]
+}]
+}
+```
+
+`trail` is every fix of the last `trail_hours` (default 6), oldest first, and `current` its last
+one. `heatmap` holds the coordinates from `heatmap_days` ago (default 7, `0` for none) up to where
+the trail starts. Both drop fixes less precise than `max_accuracy` metres (default 10, `0` keeps
+everything). While a poll keeps the database busy for more than five seconds, the answer is `503`
+with `Retry-After: 2`.
 
 ### Backfill from the position history
 
@@ -149,6 +225,14 @@ build with your own ids:
 PUID=$(id -u) PGID=$(id -g) docker compose build
 ```
 
+To use the [live-tracking API](#live-tracking), put a token in a `.env` next to `compose.yaml`
+(compose reads it for variable substitution) and recreate the container:
+
+```bash
+echo "GTT_API_TOKEN=$(openssl rand -hex 32)" >> .env
+docker compose up -d
+```
+
 Ad-hoc commands run against the same archive without disturbing the watcher:
 
 ```bash
@@ -166,6 +250,10 @@ backs off to one attempt a minute, so it is cheap, but if `docker compose logs` 
 `docker compose run --rm tracker login` again.
 
 ### Reaching the archive from outside the container
+
+For an app that reads the archive on a schedule, use [`GET /devices`](#reading-the-archive-over-http)
+instead: it shares the poller's lock, so it can never make a write fail. Opening the file
+directly is for ad-hoc queries.
 
 The bind mount is the whole trick: `data/tracker.duckdb` is an ordinary file on the Pi, not
 something trapped in the container's writable layer. Install `duckdb` on the Pi and query it
@@ -204,9 +292,10 @@ variables win). See [.env.example](.env.example).
 | `GTT_REQUEST_TIMEOUT` | `10` | HTTP timeout per request |
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |
-| `GTT_LIVE_TRACKING` | `1` | Keep the tracker in live mode, see [Live tracking](#live-tracking) |
 | `GTT_BACKFILL` | `1` | Fetch the last hours of position history on every poll and fill the gaps, see [Backfill](#backfill-from-the-position-history) |
-| `GTT_LIVE_FROM` / `GTT_LIVE_UNTIL` | `15:00` / `22:00` | Daily window, UTC clock times, in which live mode is kept running; both empty means all day |
+| `GTT_API_TOKEN` | — | Bearer token for the live-tracking API; `watch` serves the API only when set, see [Live tracking](#live-tracking) |
+| `GTT_API_HOST` / `GTT_API_PORT` | `0.0.0.0` / `8080` | Where the API listens |
+| `GTT_LIVE_MAX_MINUTES` | `600` | Longest single timed activation |
 | `FRESSNAPF_EMAIL` / `FRESSNAPF_PASSWORD` | — | `login` only; prompted if unset |
 
 ## Schema
@@ -237,7 +326,12 @@ DuckDB allows one writer per database file, and that also blocks read-only conne
 processes. So the connection is opened, written, and closed *per poll* — never held across
 `watch`'s sleep — and an advisory `flock` in front of it turns an overlapping poll into a clean
 "skipping" log line instead of an exception. A concurrent `gtt poll` and `gtt watch` is safe; one
-of them simply skips that tick.
+of them simply skips that tick. After a skip, `watch` tries again two seconds later rather than
+a full interval later, since whatever held the lock is usually done by then.
+
+The HTTP API runs inside `watch` and reads through the same lock. A read waits up to five seconds
+for a running poll to finish. A poll that starts during a read (a few milliseconds) is skipped
+and retried two seconds later.
 
 ## Querying
 

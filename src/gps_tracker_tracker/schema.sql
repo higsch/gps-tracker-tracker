@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS poll_log (
 
 -- One row per live-tracking request. The API's enable_live_tracking call puts
 -- the device into a 10-minute live mode (a fix every ~20s instead of every ~10
--- minutes); the poller keeps it running while live tracking is enabled, and
+-- minutes); the poller keeps it running while the switch is on (see api.py), and
 -- this is how it knows when the current window runs out. `reason` is "start"
 -- for a fresh window and "renew" for extending a running one.
 CREATE TABLE IF NOT EXISTS live_tracking_log (

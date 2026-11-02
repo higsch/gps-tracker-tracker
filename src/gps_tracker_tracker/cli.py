@@ -17,6 +17,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from . import __version__
+from .api import start_api_server
 from .auth import (
     LoginError,
     NoCredentialsError,
@@ -38,6 +39,9 @@ EXIT_NO_CREDENTIALS = 3
 
 _WATCH_JITTER = 0.1
 _WATCH_MAX_BACKOFF = 1800
+# A busy database is held by a poll or a quick read that ends in moments --
+# often the control API's own status read -- so try again soon, not next interval.
+_WATCH_BUSY_RETRY = 2.0
 _RELATIVE_SINCE = re.compile(r"^(\d+)([smhdw])$")
 _SINCE_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
 
@@ -186,16 +190,45 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
     """Poll on a loop until interrupted."""
     interval = args.interval or config.poll_interval
     stop = threading.Event()
+    # Cuts the sleep between polls short: set on stop, and by the control API
+    # when live tracking is switched on, so it starts now rather than next poll.
+    wake = threading.Event()
 
     def request_stop(signum: int, _frame: FrameType | None) -> None:
         # Only sets a flag: an in-flight write finishes before we exit.
         log.info("received %s, finishing current poll then exiting", signal.Signals(signum).name)
         stop.set()
+        wake.set()
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    server = None
+    if config.api_token and not args.no_api:
+        try:
+            server = start_api_server(config, on_activate=wake.set)
+        except OSError as exc:
+            log.error("cannot serve the live-tracking API on %s:%d: %s", config.api_host, config.api_port, exc)
+            return EXIT_FAILURE
+    elif not args.no_api:
+        log.info("live-tracking API off: set GTT_API_TOKEN to serve it")
+
     log.info("watching every %ds (Ctrl-C to stop)", interval)
+    try:
+        return _watch_loop(args, config, interval, stop, wake)
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+
+
+def _watch_loop(
+    args: argparse.Namespace,
+    config: Config,
+    interval: int,
+    stop: threading.Event,
+    wake: threading.Event,
+) -> int:
     iterations = 0
     consecutive_failures = 0
     exit_code = EXIT_OK
@@ -209,6 +242,7 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
         except NoCredentialsError as exc:
             log.error("%s", exc)
             return EXIT_NO_CREDENTIALS
+        busy = result is None
 
         if result is not None:
             log.info("%s", _describe(result))
@@ -233,7 +267,10 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
             log.warning(
                 "%d consecutive failure(s), backing off to %.0fs", consecutive_failures, delay
             )
-        stop.wait(delay)
+        if busy:
+            delay = min(delay, _WATCH_BUSY_RETRY)
+        wake.wait(delay)
+        wake.clear()
 
     return exit_code
 
@@ -391,6 +428,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch_parser.add_argument(
         "--max-iterations", type=int, default=0, help="stop after N polls (0 = forever)"
+    )
+    watch_parser.add_argument(
+        "--no-api", action="store_true", help="do not serve the live-tracking API"
     )
     watch_parser.set_defaults(func=cmd_watch)
 
