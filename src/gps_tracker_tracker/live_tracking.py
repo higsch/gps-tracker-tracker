@@ -59,6 +59,18 @@ class LiveSwitch:
         return self.enabled and (self.until is None or now < self.until)
 
 
+def _parse_time(text: str) -> datetime:
+    """An ISO timestamp, always timezone-aware.
+
+    The API writes an offset, but a hand-edited file may not. A time without
+    one is taken as local time -- the host's, or the container's TZ -- since
+    that is what a person typing it means. Left naive, it could not be compared
+    with the aware clock and would crash every reader of the switch.
+    """
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo is not None else parsed.astimezone()
+
+
 def load_switch(path: Path) -> LiveSwitch:
     """The stored switch; off if it was never set or the file is unreadable."""
     try:
@@ -67,8 +79,8 @@ def load_switch(path: Path) -> LiveSwitch:
         changed_at = data.get("changed_at")
         return LiveSwitch(
             enabled=data["enabled"] is True,
-            until=datetime.fromisoformat(until) if until else None,
-            changed_at=datetime.fromisoformat(changed_at) if changed_at else None,
+            until=_parse_time(until) if until else None,
+            changed_at=_parse_time(changed_at) if changed_at else None,
         )
     except FileNotFoundError:
         return LiveSwitch()

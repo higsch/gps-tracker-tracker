@@ -6,6 +6,7 @@ happens eight or ten minutes into a live window -- cannot be driven through
 """
 
 import json
+import time as time_module
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -64,6 +65,27 @@ def test_the_switch_round_trips_through_its_file(tmp_path: Path) -> None:
     assert load_switch(path) == switch
     # No temporary files left behind next to it.
     assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
+def test_a_hand_written_time_without_an_offset_is_local_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    time_module.tzset()
+    try:
+        path = tmp_path / "live.json"
+        path.write_text('{"enabled": true, "until": "2026-11-04T22:00:00", "changed_at": "2026-11-04T20:00:00"}')
+        switch = load_switch(path)
+    finally:
+        monkeypatch.delenv("TZ")
+        time_module.tzset()
+
+    # 22:00 in Berlin in November (CET) is 21:00 UTC.
+    assert switch.until == datetime(2026, 11, 4, 21, 0, tzinfo=UTC)
+    assert switch.changed_at == datetime(2026, 11, 4, 19, 0, tzinfo=UTC)
+    # Comparable with the aware clock, rather than raising TypeError.
+    assert switch.active(datetime(2026, 11, 4, 20, 59, tzinfo=UTC))
+    assert not switch.active(datetime(2026, 11, 4, 21, 0, tzinfo=UTC))
 
 
 def test_a_missing_or_broken_switch_file_means_off(tmp_path: Path) -> None:

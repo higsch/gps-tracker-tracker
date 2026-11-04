@@ -266,28 +266,40 @@ def test_a_failed_fetch_does_not_request_live_tracking(config: Config, api_serve
     assert _live_requests == []
 
 
-def test_live_tracking_is_not_requested_while_switched_off(config: Config, api_server: str) -> None:
-    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
+def _assert_nothing_polled(config: Config) -> None:
+    result = poll_once(config)
+    assert result.live_off
+    assert result.outcomes == []
+    assert _requests == [] and _history_requests == [] and _live_requests == []
+    assert not config.db_path.exists()
 
-    assert poll_once(config).new_positions == 1
-    assert _live_requests == []
+
+def test_nothing_is_polled_or_stored_while_switched_off(config: Config, api_server: str) -> None:
+    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
+    _assert_nothing_polled(config)
 
 
 def test_live_tracking_is_off_by_default(config: Config, api_server: str) -> None:
     config.live_switch_path.unlink()
-
-    assert poll_once(config).new_positions == 1
-    assert _live_requests == []
+    _assert_nothing_polled(config)
 
 
-def test_live_tracking_is_not_requested_after_the_activation_ran_out(
-    config: Config, api_server: str
-) -> None:
+def test_nothing_is_polled_after_the_activation_ran_out(config: Config, api_server: str) -> None:
     ended = datetime.now(UTC) - timedelta(minutes=1)
     save_switch(config.live_switch_path, LiveSwitch(enabled=True, until=ended))
+    _assert_nothing_polled(config)
 
-    assert poll_once(config).new_positions == 1
-    assert _live_requests == []
+
+def test_the_poll_command_does_nothing_while_switched_off(
+    config: Config, api_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
+    monkeypatch.setenv("GTT_DB_PATH", str(config.db_path))
+    monkeypatch.setenv("GTT_CREDENTIALS_PATH", str(config.credentials_path))
+
+    assert main(["poll"]) == EXIT_OK
+    assert _requests == []
+    assert not config.db_path.exists()
 
 
 def test_history_is_requested_for_a_full_day_when_the_archive_is_empty(
@@ -378,7 +390,35 @@ def test_watch_runs_the_requested_number_of_polls(
         assert conn.execute("SELECT count(*) FROM positions").fetchone()[0] == 1
 
 
-def test_activating_through_the_api_starts_live_mode_without_waiting_for_the_next_poll(
+def test_watch_does_not_poll_or_touch_the_database_while_switched_off(
+    config: Config, api_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_switch(config.live_switch_path, LiveSwitch(enabled=False))
+    monkeypatch.setenv("GTT_DB_PATH", str(config.db_path))
+    monkeypatch.setenv("GTT_CREDENTIALS_PATH", str(config.credentials_path))
+    monkeypatch.setenv("GTT_API_TOKEN", "")
+    seen_while_off: dict[str, object] = {}
+
+    def switch_on_by_hand() -> None:
+        # Long enough for a couple of idle ticks at a 1s interval.
+        time_module.sleep(2.5)
+        seen_while_off["requests"] = list(_requests)
+        seen_while_off["db_exists"] = config.db_path.exists()
+        save_switch(config.live_switch_path, LiveSwitch(enabled=True))
+
+    flipper = threading.Thread(target=switch_on_by_hand, daemon=True)
+    flipper.start()
+    assert main(["watch", "--interval", "1", "--max-iterations", "1"]) == EXIT_OK
+    flipper.join(timeout=5)
+
+    assert seen_while_off == {"requests": [], "db_exists": False}
+    # The hand-edited file is picked up on the next idle tick.
+    assert len(_requests) == 1
+    with open_store(config.db_path, read_only=True) as conn:
+        assert conn.execute("SELECT count(*) FROM poll_log").fetchone()[0] == 1
+
+
+def test_activating_through_the_api_starts_polling_without_waiting_for_the_interval(
     config: Config, api_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     save_switch(config.live_switch_path, LiveSwitch(enabled=False))
@@ -390,30 +430,38 @@ def test_activating_through_the_api_starts_live_mode_without_waiting_for_the_nex
     monkeypatch.setenv("GTT_API_TOKEN", "tok")
     monkeypatch.setenv("GTT_API_HOST", "127.0.0.1")
     monkeypatch.setenv("GTT_API_PORT", str(port))
+    requests_before_activation: list[list[str]] = []
 
-    def activate_after_the_first_poll() -> None:
+    def activate_once_the_api_is_up() -> None:
         deadline = time_module.monotonic() + 10
-        while not _requests and time_module.monotonic() < deadline:
-            time_module.sleep(0.05)
         while time_module.monotonic() < deadline:
             try:
-                httpx.post(
-                    f"http://127.0.0.1:{port}/live-tracking/activate",
+                httpx.get(
+                    f"http://127.0.0.1:{port}/live-tracking",
                     headers={"Authorization": "Bearer tok"},
                     timeout=5,
                 ).raise_for_status()
-                return
+                break
             except httpx.TransportError:
                 time_module.sleep(0.05)
+        time_module.sleep(0.5)
+        requests_before_activation.append(list(_requests))
+        httpx.post(
+            f"http://127.0.0.1:{port}/live-tracking/activate",
+            headers={"Authorization": "Bearer tok"},
+            timeout=5,
+        ).raise_for_status()
 
-    activator = threading.Thread(target=activate_after_the_first_poll, daemon=True)
+    activator = threading.Thread(target=activate_once_the_api_is_up, daemon=True)
     activator.start()
     started = time_module.monotonic()
-    # A 60s interval: only the wake-up can get the second poll in this quickly.
-    assert main(["watch", "--interval", "60", "--max-iterations", "2"]) == EXIT_OK
+    # A 60s interval: only the wake-up can get a poll in this quickly.
+    assert main(["watch", "--interval", "60", "--max-iterations", "1"]) == EXIT_OK
     activator.join(timeout=5)
 
     assert time_module.monotonic() - started < 30
+    assert requests_before_activation == [[]]
+    assert len(_requests) == 1
     assert len(_live_requests) == 1
 
 

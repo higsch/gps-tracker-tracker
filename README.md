@@ -41,9 +41,9 @@ Polling uses only that token — it never re-authenticates and never needs your 
 ## Use
 
 ```bash
-uv run gtt poll                  # fetch once, append, exit  (what launchd runs)
-uv run gtt watch                 # fetch on a loop, every GTT_POLL_INTERVAL seconds,
-                                 # and serve the HTTP API if GTT_API_TOKEN is set
+uv run gtt poll                  # fetch once if live tracking is on (what launchd runs)
+uv run gtt watch                 # while live tracking is on, fetch every GTT_POLL_INTERVAL
+                                 # seconds; serve the HTTP API if GTT_API_TOKEN is set
 uv run gtt watch --no-api        # the loop without the API
 uv run gtt stats                 # what the archive holds
 uv run gtt devices               # known trackers
@@ -67,6 +67,12 @@ button is a single call, `PUT /devices/{serial}/enable_live_tracking`, that puts
 a ten-minute live mode of a fix every ~20 seconds. There is no "off" call; it just expires.
 
 Live tracking is off until you switch it on through a small HTTP API that `gtt watch` serves.
+Positions are only polled and stored while it is on, by `watch` and `poll` alike. With the switch
+off, neither makes any call to the tracker or opens the database: `poll` exits right away, and
+`watch` just re-reads the switch file once per interval. The archive then gets no new fixes, but
+the first poll after you switch on backfills up to the last 24 hours from the position history
+(see `GTT_BACKFILL`).
+
 While it is on, both `poll` and `watch` keep live mode running: it is requested on the next
 successful poll and renewed two minutes before each ten-minute grant runs out. Switching it off
 only stops the renewals, so the tracker stays live until the current grant expires, at most ten
@@ -102,10 +108,11 @@ All three return the same document:
 `live_until` is when each tracker's current grant runs out, `null` if none is running.
 `devices` is `null` when the database stayed busy with a poll for longer than five seconds.
 
-Activating wakes `watch`, so live mode starts within a second instead of at the next poll. The
+Activating wakes `watch`, so polling and live mode start within a second instead of at the next tick. The
 switch lives in a JSON file next to the database (`tracker.duckdb.live.json`), so a launchd-driven
 `gtt poll` respects it too. Without a `watch` running, nothing serves the API, but you can edit
-that file directly.
+that file directly, e.g. `{"enabled": true, "until": "2026-11-04T22:00:00"}`.
+A time without an offset counts as local time (`TZ`, `Europe/Berlin` in the Docker setup).
 
 Errors come back as `{"error": "..."}` with a matching status code: `401` for a missing or wrong
 token, `400` for a bad body or query parameter, `404` for an unknown route, and `405` for the wrong
@@ -177,7 +184,9 @@ tail -f logs/poller.log
 
 That installs a launchd agent firing `gtt poll` every 5 minutes, at login and after wake. Use
 `gtt poll` under launchd rather than `gtt watch` — launchd owns the scheduling, restarts, and
-catch-up after sleep. To remove it:
+catch-up after sleep. Each run does nothing unless live tracking is switched on, and launchd has
+no API to switch it, so edit `tracker.duckdb.live.json` (see [Live tracking](#live-tracking)). To
+remove it:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.higsch.gps-tracker-tracker
@@ -291,7 +300,7 @@ variables win). See [.env.example](.env.example).
 |---|---|---|
 | `GTT_DB_PATH` | `./data/tracker.duckdb` | The archive |
 | `GTT_CREDENTIALS_PATH` | `~/.config/gps-tracker-tracker/credentials.json` | Device tokens, mode `0600` |
-| `GTT_POLL_INTERVAL` | `300` | Seconds between polls in `watch` |
+| `GTT_POLL_INTERVAL` | `300` | Seconds between polls in `watch` while live tracking is on |
 | `GTT_REQUEST_TIMEOUT` | `10` | HTTP timeout per request |
 | `GTT_LOCALE` | `de` | Language of the sign-in email |
 | `GTT_LOG_LEVEL` | `INFO` | `DEBUG` logs full request URLs, which carry device tokens |

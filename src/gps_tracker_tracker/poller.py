@@ -78,6 +78,8 @@ class PollResult:
     """Aggregate result of one poll across all trackers."""
 
     outcomes: list[DeviceOutcome] = field(default_factory=list)
+    # True when the poll did nothing because live tracking is switched off.
+    live_off: bool = False
 
     @property
     def ok(self) -> bool:
@@ -264,7 +266,10 @@ def _request_live_tracking(
 
 
 def poll_once(config: Config) -> PollResult:
-    """Fetch every known tracker once and persist the results.
+    """Fetch every known tracker once and persist the results -- but only while
+    live tracking is switched on. With the switch off (or its end time passed)
+    this returns an empty result with `live_off` set, without calling the
+    tracker API or opening the database.
 
     The write lock is taken *before* the HTTP calls so that an overlapping
     launchd tick skips without touching the API at all -- but the duckdb
@@ -281,11 +286,13 @@ def poll_once(config: Config) -> PollResult:
 
     """
     credentials = load_credentials(config.credentials_path)
-    result = PollResult()
-    wanted: list[tuple[DeviceOutcome, str]] = []
     # Read once per poll. The file is replaced atomically, so this never races
     # the control API; a flip lands on the next poll, which the API wakes.
     switch = load_switch(config.live_switch_path)
+    if not switch.active(datetime.now(UTC)):
+        return PollResult(live_off=True)
+    result = PollResult()
+    wanted: list[tuple[DeviceOutcome, str]] = []
 
     with acquire_write_lock(config.db_path):
         history_hours: dict[str, int] = {}

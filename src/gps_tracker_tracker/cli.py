@@ -27,6 +27,7 @@ from .auth import (
     save_credentials,
 )
 from .config import Config
+from .live_tracking import load_switch
 from .poller import PollResult, poll_once
 from .store import DatabaseMissingError, StoreBusyError, open_store
 
@@ -171,12 +172,15 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_poll(args: argparse.Namespace, config: Config) -> int:
-    """Fetch once and append to the archive."""
+    """Fetch once and append to the archive, if live tracking is switched on."""
     try:
         result = poll_once(config)
     except StoreBusyError as exc:
         # An overlapping launchd tick is not a failure; the next one will catch up.
         log.info("skipping: %s", exc)
+        return EXIT_OK
+    if result.live_off:
+        log.info("live tracking off, not polling")
         return EXIT_OK
 
     log.info("polled %d device(s) -- %s", len(result.outcomes), _describe(result))
@@ -187,7 +191,12 @@ def cmd_poll(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_watch(args: argparse.Namespace, config: Config) -> int:
-    """Poll on a loop until interrupted."""
+    """Poll on a loop until interrupted, but only while live tracking is switched on.
+
+    With the switch off, the loop neither calls the tracker API nor opens the
+    database: it only re-reads the switch file once per interval, and wakes
+    at once when the control API switches live tracking on.
+    """
     interval = args.interval or config.poll_interval
     stop = threading.Event()
     # Cuts the sleep between polls short: set on stop, and by the control API
@@ -212,6 +221,11 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
             return EXIT_FAILURE
     elif not args.no_api:
         log.info("live-tracking API off: set GTT_API_TOKEN to serve it")
+    if server is None:
+        log.warning(
+            "nothing can switch live tracking on from this process; watch polls only while %s says so",
+            config.live_switch_path,
+        )
 
     log.info("watching every %ds (Ctrl-C to stop)", interval)
     try:
@@ -232,8 +246,23 @@ def _watch_loop(
     iterations = 0
     consecutive_failures = 0
     exit_code = EXIT_OK
+    polling: bool | None = None
 
     while not stop.is_set():
+        # poll_once checks the switch too; checking here as well lets the loop
+        # idle on `wake` and log the on/off transitions once.
+        live = load_switch(config.live_switch_path).active(datetime.now(UTC))
+        if live != polling:
+            log.info("live tracking %s", "on, polling" if live else "off, not polling")
+            polling = live
+        if not live:
+            consecutive_failures = 0
+            # Activating through the API sets `wake`; the timeout only catches a
+            # hand-edited switch file.
+            wake.wait(interval)
+            wake.clear()
+            continue
+
         try:
             result = poll_once(config)
         except StoreBusyError as exc:
@@ -422,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     poll_parser = subparsers.add_parser("poll", help="fetch once and store")
     poll_parser.set_defaults(func=cmd_poll)
 
-    watch_parser = subparsers.add_parser("watch", help="fetch on a loop")
+    watch_parser = subparsers.add_parser("watch", help="fetch on a loop while live tracking is on")
     watch_parser.add_argument(
         "--interval", type=int, default=None, help="seconds between polls (else $GTT_POLL_INTERVAL)"
     )

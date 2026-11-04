@@ -115,7 +115,9 @@ Each entry in `devices` is one tracker, sorted by `serialnumber`:
 | `current` | object or null | The last element of `trail`, the same object. `null` when the trail is empty |
 | `heatmap` | array | Older positions as `{lat, lng}`, in no particular order. They never overlap the trail. Can hold thousands of points |
 
-An empty `devices` array means the service hasn't completed its first poll yet.
+An empty `devices` array means the service hasn't completed its first poll yet. The service only
+polls while live tracking is on, so with it off this stays empty, or the data stops at the last
+live session.
 
 ### `GET /live-tracking`
 
@@ -161,6 +163,10 @@ This shapes the UI, so read it before building the switch.
 
 - **What it is:** normally the tracker reports a position about every 10 minutes. In live mode it
   reports about every 20 seconds. Live mode drains a full battery in about 10 hours.
+- **The service only polls while live tracking is on.** With it off, `/devices` keeps returning
+  the data from the last live session and doesn't change. Show the time of the latest fix so the
+  map doesn't look current when it isn't. When live tracking is switched on, the first poll also
+  backfills up to 24 hours of history.
 - **How the service keeps it running:** the tracker's cloud grants live mode 10 minutes at a time.
   While the switch is on, the service renews it shortly before each grant runs out.
 - **Switching on is quick.** The service starts live mode within about a second, but `live_until`
@@ -176,9 +182,9 @@ This shapes the UI, so read it before building the switch.
 
 ## Refresh cadence
 
-The service polls the tracker about every 30 seconds, and live fixes arrive about every 20
-seconds. Fetching `/devices` every 30 seconds on the server and pushing the result to browsers is
-enough. Don't go much faster than every 10 seconds: each request briefly locks the archive.
+While live tracking is on, the service polls the tracker about every 30 seconds, and live fixes
+arrive about every 20 seconds. While it is off, nothing changes. Fetching `/devices` every 30
+seconds on the server and pushing the result to browsers is enough. Don't go much faster than every 10 seconds: each request briefly locks the archive.
 
 After this app flips the switch, fetch `/devices` once immediately and push it to browsers, so the
 UI updates without waiting for the next tick.
